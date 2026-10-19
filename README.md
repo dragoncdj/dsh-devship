@@ -1,0 +1,187 @@
+# dsh-devship（研发直发台） · 应用运行
+
+在 DSH **右侧栏**里多出一个「应用运行」标签页，列出**当前工作区可启动的项目**，像 IDEA 的启动配置一样一键启动 / 停止 / 重启，并支持 Maven 打包、实时看日志尾部。
+
+## 面板在哪
+
+- 右侧栏（会话右边那列）出现一个「应用运行」页签，插件激活后自动打开；关掉后可从右侧栏的「+」菜单里重新打开；
+- 面板顶部显示工作区路径、Profile 选择（默认 dev / local）、clean 开关、刷新、全量打包；
+- 每个项目一张卡片：勾选框、状态点、类型徽标（Java / 前端）、端口、实际会执行的命令、`启动 / 停止 / 打包 / 日志 / 清除 / 隐藏`；
+- **批量操作**：卡片前的勾选框 + 顶部「全选 / 启动选中 / 停止选中」；批量启动按顺序一个个来（避免多个 Maven 同时写本地仓库），失败的会汇总提示「哪个项目 + 什么原因」；
+- **隐藏服务**：每行「隐藏 / 取消隐藏」，隐藏列表持久化在 `<工作区>/.dsh-devship/prefs.json`；顶部按需出现「显示已隐藏 (n)」开关，隐藏项半透明显示；
+- 端口被**外部实例**（IDEA / 终端起的）占用时，该行会标「端口占用」，点启动会先给出明确提示而不是白跑一遍 Maven；
+- 标签页 `keepMounted`，切走再切回不会丢轮询状态；每 2.5s 拉一次运行状态与日志尾部。
+
+## 能识别什么
+
+- **Java**：根 `pom.xml` 的 `<modules>` 里、且 `src/main/java` 下存在 `*Application.java` 的模块（含 `xxx/yudao-module-xxx-server` 这种二级模块）。端口从 `application-dev.yaml` 的顶层 `server.port` 读取。
+- **前端**：根目录或两层子目录里带 `scripts.dev` 的 `package.json`（如 `yudao-ui/*`），用 `pnpm dev` 启动。
+- 扫描结果缓存 4 秒，启动前会重新扫描，新增模块无需重启插件。
+
+## 启动流程（Java）
+
+1. `mvn -pl <模块> -am -DskipTests -Dspring-boot.repackage.skip=true install`
+   - `-am` 先构建上游模块，避免本地仓库里是过期快照；
+   - `-Dspring-boot.repackage.skip=true` 让模块 jar 保持普通 jar（`BOOT-INF` 嵌套包会让聚合壳启动时缺 Bean）。
+2. `mvn -pl <模块> spring-boot:run`（可带 `-Dspring-boot.run.profiles=<profile>`）。
+
+两个阶段共用一份日志尾部；进入运行阶段时会清掉构建日志，只留应用输出。启动前会用 800ms 探测端口，已被占用就直接提示「可能已在运行」，不再白跑一遍 Maven。
+
+Windows 上启动不会弹黑色控制台窗口：脚本由 `wscript.exe`（GUI 子系统）以 `WScript.Shell.Run(..., 0, True)` 隐藏执行并同步等待，
+退出码照常回传；停止时 `taskkill /T /F` 连带整棵进程树（cmd → mvn → java / pnpm → node）一起结束。
+
+日志区固定 260px 高、内部滚动，不随内容伸缩。
+
+## 配置（可选）
+
+工作区根目录放 `.dsh-devship.json`，可覆盖自动探测结果：
+
+```json
+{
+  "maven": "D:/ProgramFiles/apache-maven-3.9.15/bin/mvn.cmd",
+  "pnpm": "C:/Users/me/AppData/Roaming/npm/pnpm.cmd",
+  "javaHome": "C:/Users/me/.jdks/ms-25.0.4"
+}
+```
+
+不写也能用：Maven 依次找 PATH → `M2HOME/MAVEN_HOME/bin` → 常见安装目录 → IDEA 自带 Maven；
+JDK 按根 pom 的 `java.version` 找 `~/.jdks`、`C:\Program Files\Java`、Adoptium 等目录里匹配的版本（`JAVA_HOME` 版本不合适时会自动换）。
+
+运行时产生的启动脚本放在 `<工作区>/.dsh-devship/`。
+
+## 部署（把包发到测试服务器）
+
+面板右上「部署配置」打开的是一个表单（保存在 `<工作区>/.dsh-devship/deploy.json`）：
+
+- **测试服务器**：地址（IP/域名）、端口、用户、密码 —— 直接填你的测试机，不依赖任何预设主机
+- **可选**：`dsh-ssh` 主机别名。填了就用 dsh-ssh 里存的凭据，留空则用上面的地址/密码（地址优先）
+- **各服务部署目录**：每个项目一行，填远端目录（留空 = 该项目不部署，卡片上不出现「部署」按钮）
+
+对应 JSON（想看原文时）：
+
+```json
+{
+  "host": "10.0.0.9", "port": 22, "user": "root", "password": "***",
+  "targets": {
+    "yudao-server": { "remoteDir": "/data/apps/jyx/server" },
+    "yudao-ui/yudao-ui-pos-web": { "remoteDir": "/data/apps/jyx/web/pos" }
+  }
+}
+```
+
+- 产物默认：Java = `<模块>/target/<artifactId>.jar`，前端 = `dist-prod`/`dist`；可用 `artifact` 覆盖
+- 部署用 ssh2 走 SFTP：文件直接 put；目录递归建目录后逐个上传，进度实时写进日志区
+- 批量：「部署选中」按顺序逐个项目部署，失败项汇总提示
+
+实测：连 1.0.0.96 → `mkdir -p` → 上传 → `部署完成：1 个文件` 全链路通过（当时的测试产物已清理；现在配置已清空，等你填测试机地址）。
+
+## 打包 / 发布 / 部署（效率相关）
+
+**打包**
+- Java：`mvn -pl <模块> -am package -DskipTests -T 1C`（多线程）；勾 clean 变 `clean package`
+- 「快速打包」勾选后去掉 `-am`：只编目标模块（依赖须已 install 过），并保留 `-T 1C`
+- 前端：直接 `node ./node_modules/vite/bin/vite.js build --mode prod`（不经 pnpm，避免多开可见窗口）
+- 全量打包：根 reactor `mvn package -DskipTests -T 1C`
+
+**一键发布**（卡片上的「发布」）
+① 打包 → ② 部署 → ③ 重启容器 → ④ 校验，全流程写在一个任务条目里，日志带阶段编号：
+```
+15:22:10 ① 打包（快速，不带 -am） …
+15:22:10 ① 打包完成
+15:22:10 ② 部署 …
+15:22:10 产物：...\target\xxx.jar
+15:22:10 部署完成：1 个文件，155.88 MB
+15:22:10 容器 xxx 已重启，校验状态 …
+15:22:10 容器状态：Up 8 seconds
+✔ 发布完成
+```
+批量：「发布选中」逐个发布。
+
+**部署增强**
+- 目录产物：本地 `tar`（不压缩）→ 单文件上传 → 远端解包；失败自动退回 8 路并发逐文件上传
+- jar 产物：上传前 `cp x.jar x.jar.bak`（回滚用）
+- fat-jar 预检：jar 尾部找不到 `BOOT-INF/` 时日志里给 ⚠ 警告（不是 Spring Boot 可执行包）
+- 重启后校验：`docker ps` 查容器状态，不在运行列表就带 `docker logs --tail 20` 报错
+- 批量部署：多个项目同时上传（不再串行），一条 SSH 会话可复用
+
+## 启动模式：关 DSH 不停止（开关，默认开启）
+
+面板上「clean / 快速打包」同一行有 **「关 DSH 不停止」** 复选框，默认勾选。
+
+| 模式 | 启动方式 | DSH 退出后 | 日志 | 停止 |
+|---|---|---|---|---|
+| 勾选（默认，脱离） | 写一个 `.cmd`（输出重定向到 `logs/run-*.detached.log`），用 **WMI Win32_Process.Create** 起进程 | **服务继续跑** | 读日志文件（增量） | `taskkill /PID <pid> /T /F` |
+| 不勾（附带） | 走 ctx.subprocess（管道） | 随 DSH 一起结束 | 管道 | handle.terminate() |
+
+脱离模式细节：
+- WMI 起的进程父进程是系统服务（WmiPrvSE），不在 DSH 的作业对象里，所以 DSH 关了也不受影响
+- 启动脚本只有 ASCII 内容（cmd.exe 按 OEM 代码页解析，中文会破坏批处理语法）
+- 记录 pid 到 `.dsh-devship/state.json`，DSH 重启后据此接管（显示「运行中（接管）」）
+- 代价：脱离模式拿不到退出码（靠 pid 判活），且 **DSH 崩溃/被强杀时进程不会被自动清理**
+
+## 重启后接管运行状态
+
+启动服务时会把「谁在跑」写进 `<工作区>/.dsh-devship/state.json`（项目 id / 端口 / 启动时间 / 日志文件）；
+停止或进程退出时自动删除对应记录。
+
+DSH 重启后，面板每轮 `/status` 会做一次接管：
+
+- state.json 里有记录 **且** 那个端口仍在监听 → 建一条「接管」条目放进运行列表，
+  面板显示 `运行中（接管）`，日志区还能看到重启前的日志尾部（从 `logs/run-*.log` 读）
+- 端口已空 → 认为服务真的停了，清掉这条记录（面板不再显示幽灵状态）
+- 接管条目点「停止」：按端口找监听进程（`netstat -ano`）→ `taskkill /PID <pid> /T /F` 整棵树结束
+- IDEA / 终端里自己启的服务不会被接管（state.json 里没有记录），仍按「端口占用」提示
+
+## 日志
+
+- 面板日志框固定 260px 高、内部滚动，显示该任务**最近 100k 字符**（约 1500~2000 行）
+- **全量日志同时落盘**：`<工作区>/.dsh-devship/logs/<任务>.log`（不截断）
+  - 运行任务：`run-<项目>.log`，按阶段追加（`===== 阶段 deps =====` / `===== 阶段 run =====`）
+  - 打包 `build-*.log`、部署 `deploy-*.log`、发布 `release-*.log`
+  - 自动清理：保留最近 60 个 / 7 天内
+- 日志框右侧两个按钮：**复制**（复制全量日志到剪贴板）、**打开文件**（资源管理器定位该 .log）
+- 采集层：单任务 stdout/stderr 内存窗口 64KB + spill 4MB，轮询 2.5s；
+  两次轮询间隔内输出超过 4MB 才可能丢行（正常构建达不到），落盘文件与面板取的是同一份数据，
+  区别只在面板会按 100k 截头、文件不截
+
+## 已知限制
+
+- 只管理**本插件启动**的进程；IDEA / 终端里起的实例需要先在那边停掉（端口占用会明确提示）。
+- 聚合壳 `yudao-server` 的模块 jar 若已被 repackage 成 fat-jar，命令行启动会缺 Bean；IDEA 直接跑不受影响。需要命令行跑单体时，先 `mvn -pl yudao-server -am clean install -DskipTests -Dspring-boot.repackage.skip=true`。
+- 前端 dev 端口由 Vite 自己选（占用时自动 +1），插件不接管。
+
+## 交互通道
+
+Host 半用 `ctx.webServer` 注册同源 HTTP 路由（`/dsh-devship/list|status|launch|stop|build|forget|client-report`），
+Client 半用 `fetch` 调用；进程由 `ctx.subprocess` 托管，插件卸载时会终止自己启动的子进程。
+
+## 踩坑记录：本地插件必须导出 `./package.json`
+
+DSH 组装前端模块图时会 `require.resolve('<包名>/package.json')` 定位包清单。
+`package.json` 的 `exports` 一旦是白名单形式，**没有 `"./package.json": "./package.json"` 这一项就会抛
+`ERR_PACKAGE_PATH_NOT_EXPORTED`，client-modules 捕获后把整个包静默跳过**——
+表现为：Host 半一切正常（HTTP 路由都能用），但插件在界面上完全不出现，也没有任何报错。
+
+所以 `exports` 里必须保留：
+
+```json
+"./package.json": "./package.json"
+```
+
+另外几个相关经验：
+
+- 客户端模块清单是在 **Host 启动时**组装进 `window.__DSH_BOOT__` 的，改完 `client.js` 必须**重启 DSH**（不是刷新页面）才会加载；刷新只对已进图的 bundle 生效。
+- 排查时可以 `GET /dsh-devship/client-report`（客户端 apply 时自报 `apply-start` / `apply-ok` / `apply-error` / `open-ok` / `open-failed`）确认客户端半到底跑没跑。
+- **不要注册 `sidebar.right.tab.guide.entry`**：那个槽是「自定义整张卡片」，注册后会把 owner 的标准卡片（图标+标题+描述+点击打开）整个替换掉，表现是「+」列表里只剩一个点不动的图标。想要图标就写在 tab 类型里：`guide: [{ id, order, title, description, icon }]`。
+- 自动打开右栏页签要两步：`ctx.sidebarRight.openTab(kind)`（会话还没挂到右栏时会抛，需要定时重试）+ `if (!isExpanded()) ctx.sidebarRight.toggleExpanded()`（只开页签不会自动展开右栏）。
+- 右侧栏开关快捷键是 **Ctrl+Alt+B**（`sidebar.right.toggle`），收起状态下整条页签栏都不渲染。
+
+## 实测记录（2026-10-19，本机）
+
+- `/dsh-devship/list`：root = `E:\workspace\jyx-workspace\jyx-erp`，识别 8 个项目，端口 48080/48083/48081/48082/48088/48089 + 两个前端。
+- `/dsh-devship/version` 诊断：`required java=25`，选中 `C:\Users\Administrator\.jdks\ms-25.0.4`（`JAVA_HOME` 是 17 时也能自动换）；`mvn` 命中 `D:\ProgramFiles\apache-maven-3.9.15\bin\mvn.cmd`（PATH 里没有 mvn）。
+- `/dsh-devship/launch` + `/status` + `/stop`（pos-web）：`pnpm dev` → Vite ready（81 端口）→ 停止后进程退出、端口释放。
+- `/dsh-devship/build`（yudao-framework/yudao-common）：`BUILD SUCCESS`，exit 0，日志尾部实时回传。
+- Java 启动链路（erp-server）：`install` 全绿（JDK 25 编译），`spring-boot:run` 起 JVM 到 Web 容器，端口被占时给出明确提示。
+- 客户端半（最终版）：`client-report` 收到 `apply-start` → `apply-ok` → `open-ok (attempt 3)`，即启动瞬间两次因会话未挂载失败、第三次成功并自动展开右栏；Inspect 确认 `sidebar.right.pane.tab` 的 occupants 含 `dsh-devship.panel`。用户确认面板已出现在右侧栏。
+

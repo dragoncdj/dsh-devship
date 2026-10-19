@@ -1,0 +1,55 @@
+{
+  "name": "dsh-devship",
+  "version": "1.0.0",
+  "description": "DevShip for DeepSeek Harness: a right-sidebar console that lists runnable services in the workspace, starts and stops them, packages with Maven or pnpm, deploys over SSH and restarts the docker container.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "deploy",
+    "devops",
+    "maven",
+    "vite"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_GITHUB_USER/dsh-devship.git"
+  },
+  "homepage": "https://github.com/YOUR_GITHUB_USER/dsh-devship#readme",
+  "bugs": {
+    "url": "https://github.com/YOUR_GITHUB_USER/dsh-devship/issues"
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

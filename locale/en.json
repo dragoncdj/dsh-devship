@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH DevShip",
+    "description": "List runnable workspace projects (Maven/Java modules and pnpm frontends), then start, stop, restart, or package them and watch the log tail."
+  }
+}
