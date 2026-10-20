@@ -7,7 +7,7 @@ DSH 右栏「研发直发台」：列出工作区里可启动的服务，一键�
 本地目录安装（开发用）：
 
 ```sh
-dsh plugin --profile <profile> add E:\workspace\jyx-workspace\jyx-erp\.dsh-plugins\publish\dsh-devship
+dsh plugin --profile <profile> add E:\workspace\dsh-devship
 ```
 
 或从 npm / GitHub 安装（发布后）：

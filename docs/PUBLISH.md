@@ -1,64 +1,61 @@
 # 发布 dsh-devship 到 DSH 插件市场
 
-市场（`dshmarket`）的插件列表来自 **awesome-dsh-plugin** 这个 GitHub 仓库的收录数据，
-所以「发布到插件市场」= 两步：
+这个目录本身就是**插件仓库的根**（`package.json` / `index.js` / `client.js` 都在顶层），
+所以「改代码 → 发版」就是：改完 → 改版本号 → `npm publish` → 打 tag。
 
-1. 插件本身得有一个**公开 GitHub 仓库**（`package.json` 里声明 `dsh.bundle`）
-2. 往 `awesome-dsh-plugin` 提一个 PR，加 **一个** YAML 文件
-
-已经准备好的东西（都在这个目录下）：
+市场（`dshmarket`）的列表来自 **awesome-dsh-plugin** 这个 GitHub 仓库，收录 = 往它提一个 YAML 文件。
 
 | 路径 | 用途 |
 |---|---|
-| `dsh-devship/` | 可直接作为 GitHub 仓库根目录的独立包（已 `git init` + 首次提交） |
-| `dsh-devship/dsh-devship-1.1.0.tgz` | npm pack 产物（48 KB），可挂 GitHub Release |
-| `awesome-entry/dsh-devship.yml` | 要提到 awesome-dsh-plugin 的条目文件 |
-| `release.mjs` | 从工作副本重新生成发布目录（改完代码跑一次再发版） |
+| `package.json` 等（仓库根） | 插件本体，同时也是本地 DSH 的安装目录（profile 里是 junction 指向这里） |
+| `dsh-devship-<version>.tgz` | `npm pack` 产物，可挂 GitHub Release（不发 npm 时用） |
+| `docs/awesome-entry/dsh-devship.yml` | 提给 awesome-dsh-plugin 的条目文件 |
+| `docs/PUBLISH.md` | 本文 |
 
 ---
 
-## 0. 先把 owner 换成你的 GitHub 用户名
+## 0. 换掉 GitHub 用户名占位
 
-三处占位 `YOUR_GITHUB_USER`：
+`package.json` 的 `repository` / `homepage` / `bugs` 与 `README.md` 里还写着 `YOUR_GITHUB_USER`：
 
 ```powershell
-cd E:\workspace\jyx-workspace\jyx-erp\.dsh-plugins\publish
-node release.mjs 你的GitHub用户名          # 重新生成，自动替换 package.json / README
-# 条目文件也要换
-(Get-Content awesome-entry\dsh-devship.yml) -replace 'YOUR_GITHUB_USER','你的GitHub用户名' |
-  Set-Content awesome-entry\dsh-devship.yml -Encoding utf8
+cd E:\workspace\dsh-devship
+$owner = '你的GitHub用户名'
+foreach ($f in 'package.json','README.md') {
+  (Get-Content $f -Raw) -replace 'YOUR_GITHUB_USER', $owner | Set-Content $f -Encoding utf8 -NoNewline
+}
+(Get-Content docs\awesome-entry\dsh-devship.yml) -replace 'YOUR_GITHUB_USER', $owner |
+  Set-Content docs\awesome-entry\dsh-devship.yml -Encoding utf8
 ```
 
-## 1. 建 GitHub 仓库并推上去
+## 1. 建 GitHub 仓库并推送
 
-在 GitHub 上新建 **public** 仓库 `dsh-devship`（不要勾 README / .gitignore / license，本地都有了），然后：
+GitHub 上新建 **public** 仓库 `dsh-devship`（不要勾 README / .gitignore / license，本地都有了）：
 
 ```powershell
-cd E:\workspace\jyx-workspace\jyx-erp\.dsh-plugins\publish\dsh-devship
+cd E:\workspace\dsh-devship
 git remote add origin https://github.com/你的GitHub用户名/dsh-devship.git
 git branch -M main
 git push -u origin main
+git push origin v1.1.0        # 可选：把 tag 也推上去
 ```
 
-推送后到仓库页 **About → Topics** 里加上 **`dsh-plugin`**（收录要求里明确要这一项）。
+推完到仓库页 **About → Topics** 加 **`dsh-plugin`**（收录硬性要求）。
 
-> 备注：`jyx-erp` 那边是阿里云 Codeup 私有库，不能作为收录地址；这个独立仓库就是给市场用的。
+## 2. 发布到 npm（桌面端必需）
 
-## 2.（强烈建议）发布到 npm
-
-DSH **Desktop** 只能安装「已发布到 npm」的插件（源码/GitHub tarball 那条路是给 dsh web 用的），
-所以想在桌面端点一下装，就必须发 npm：
+DSH **Desktop 只能安装已发布到 npm 的插件**（GitHub 源码安装那条路是给 dsh web 的）：
 
 ```powershell
-npm login                     # 需要你的 npm 账号（当前环境未登录）
-cd E:\workspace\jyx-workspace\jyx-erp\.dsh-plugins\publish\dsh-devship
+npm login
+cd E:\workspace\dsh-devship
 npm publish --access public
 ```
 
-注意：`package.json` 的 `repository` 已经指回第 1 步的仓库地址，市场会自动把 npm 包和仓库关联（不用在条目里写 `npm:`）。
+`repository` 已指回第 1 步的仓库，市场会自动把 npm 包和仓库关联（条目里不要写 `npm:` 字段）。
 
-> 不发 npm 也能收录，但桌面端用户装不了。若走「不发 npm」路线，把 tarball 挂到 GitHub Release，
-> 并在条目里加一行：
+> 不发 npm 也能收录，但桌面端用户装不了。走这条路线的话，把 tgz 挂到 GitHub Release，
+> 并在条目里加：
 > ```yaml
 > tarball: https://github.com/你的GitHub用户名/dsh-devship/releases/download/v1.1.0/dsh-devship-1.1.0.tgz
 > ```
@@ -66,11 +63,10 @@ npm publish --access public
 ## 3. 提 PR 到 awesome-dsh-plugin
 
 1. Fork https://github.com/awesome-dsh-plugin/awesome-dsh-plugin
-2. 新增 **一个** 文件：`data/plugins/<你的用户名>__dsh-devship.yml`（内容 = `awesome-entry/dsh-devship.yml`）
-3. 不要手改两个 README（它们是脚本生成的，合并后 CI 自动重建）
-4. 提 PR，标题例如 `Add dsh-devship`
+2. 新增**一个**文件：`data/plugins/<你的用户名>__dsh-devship.yml`，内容 = `docs/awesome-entry/dsh-devship.yml`
+3. 不要手改两个 README（由脚本生成，合并后 CI 自动重建）
 
-PR 描述可以直接用：
+PR 描述模板：
 
 ```
 Add dsh-devship — a right-sidebar console for DeepSeek Harness that lists the
@@ -80,23 +76,41 @@ host over SSH, and restart the corresponding docker container.
 
 - repo: https://github.com/你的GitHub用户名/dsh-devship
 - package.json declares dsh.bundle + dsh.client (patch: ./cordis.patch.yml)
-- npm: dsh-devship (if published)
+- npm: dsh-devship
 - category: dev
 ```
 
-CI 会依次检查：条目数量、`dsh.bundle` 是否存在、仓库年龄 ≥1 天、awesome-lint 与站点构建。
-之后维护者会读一遍源码，核对描述是否属实。
+CI 依次检查：条目数量（≤3）、`dsh.bundle` 是否存在、仓库年龄 ≥1 天、awesome-lint 与站点构建。
+之后维护者会读源码核对描述是否属实。
 
 ## 4. 收录之后
 
-- 市场（Settings → Plugin Market）里能搜到、一键安装（通常合并后一天内）
-- 想加截图：在你自己的仓库 `package.json` 旁边放 `screenshots.json`（1~8 张，相对路径），推上去就行，不用再提 PR
+- 市场（Settings → Plugin Market）里能搜到、一键安装（合并后通常一天内）
+- 想加截图：在仓库根放 `screenshots.json`（1~8 张，相对路径），推上去就行，不用再提 PR
 
-## 现在就能验的
+## 日常发版
 
 ```powershell
-# tarball 内容自检
-tar -tzf dsh-devship-1.1.0.tgz
-# 本地从目录安装试试（会写进当前 profile）
-dsh plugin --profile desktop add E:\workspace\jyx-workspace\jyx-erp\.dsh-plugins\publish\dsh-devship
+cd E:\workspace\dsh-devship
+# 1) 改代码
+# 2) 改 package.json 的 version + CHANGELOG.md
+npm pack                      # 生成 tgz（可选，挂 Release 用）
+git add -A; git commit -m "release: x.y.z"; git tag vX.Y.Z
+git push; git push --tags
+npm publish --access public
+```
+
+## 本地安装（开发时）
+
+profile 里已经是指向本目录的 junction，改完代码**重启 DSH** 即生效：
+
+```powershell
+dsh plugin --profile desktop add E:\workspace\dsh-devship
+```
+
+## 自检
+
+```powershell
+node --check index.js; node --check client.js
+tar -tzf dsh-devship-1.1.0.tgz      # 应含 package.json / cordis.patch.yml / index.js / client.js / locale / icon / README / LICENSE
 ```
