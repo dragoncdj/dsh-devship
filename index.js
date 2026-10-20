@@ -713,7 +713,7 @@ async function openSshSession(config, log) {
   return { client, sftp };
 }
 
-async function uploadArtifact({ project, target, config, artifact, log, session }) {
+async function uploadArtifact({ project, target, config, artifact, log, session, onClient, isCancelled }) {
   const reusable = session !== undefined && session !== null;
   let client = reusable ? session.client : undefined;
   let sftp = reusable ? session.sftp : undefined;
@@ -721,8 +721,13 @@ async function uploadArtifact({ project, target, config, artifact, log, session 
     const opened = await openSshSession(config, log);
     client = opened.client;
     sftp = opened.sftp;
+    onClient?.(client);
   }
+  const checkCancelled = () => {
+    if (typeof isCancelled === 'function' && isCancelled() === true) throw new Error('已取消');
+  };
   try {
+    checkCancelled();
     const info = await stat(artifact);
     let remote;
     let files;
@@ -763,6 +768,7 @@ async function uploadArtifact({ project, target, config, artifact, log, session 
         let done = 0;
         const worker = async () => {
           while (next < list.length) {
+            checkCancelled();
             const file = list[next];
             next += 1;
             const remoteFile = remoteJoin(remote, file.rel);
@@ -792,6 +798,7 @@ async function uploadArtifact({ project, target, config, artifact, log, session 
       files = 1;
       bytes = info.size;
     }
+    checkCancelled();
     log(`部署完成：${files} 个文件，${(bytes / 1024 / 1024).toFixed(2)} MB`);
 
     // 部署完重启容器（配置了 container 才做），然后校验容器状态
@@ -816,7 +823,9 @@ async function uploadArtifact({ project, target, config, artifact, log, session 
     }
     return { files, bytes, remote, container: container === '' ? undefined : container, containerStatus };
   } finally {
-    if (!reusable) client.end();
+    if (!reusable) {
+      try { client.end(); } catch { /* 取消时连接可能已经断开 */ }
+    }
   }
 }
 
@@ -1372,7 +1381,7 @@ const plugin = {
       if (rootPackage !== undefined) packageDirs.push(root);
       // 广度优先找 package.json（最多 4 层，跳过 node_modules/target/dist 等）。
       // sandbox 下每次 readdir 都有固定开销，第 3 层起只往下钻「可能放前端」的目录名，
-      // 否则 jyx-erp 这种仓一次扫描要几千次 readdir（实测 9 秒）。
+      // 否则 大型多模块仓一次扫描要几千次 readdir（实测 9 秒）。
       const NODE_MAX_DEPTH = 4;
       const PROMISING = /^(?:src|main|webapp|web|front|frontend|ui|client|app|apps|modules|packages|admin|pos)$/u;
       const queue = [{ dir: root, depth: 0 }];
@@ -1727,6 +1736,94 @@ const plugin = {
       }
     }
 
+    /** 任务是否还在跑（清除这类任务需要先中断）。 */
+    function isLiveEntry(entry) {
+      return entry !== undefined
+        && (entry.state === 'running' || entry.state === 'building' || entry.state === 'stopping');
+    }
+
+    /**
+     * 中断一个任务：
+     *  - 打包：结束子进程；
+     *  - 部署：断开正在上传的 SSH 连接；
+     *  - 发布：递归中断当前阶段的子任务。
+     * 注意：只把条目从列表里删掉不会停进程，所以「清除运行中的任务」必须先走这里。
+     */
+    async function cancelTask(entry, seen) {
+      if (entry === undefined || entry === null) return;
+      const visited = seen ?? new Set();
+      if (visited.has(entry)) return;
+      visited.add(entry);
+      entry.cancelRequested = true;
+      if (entry.handle !== undefined) {
+        try { entry.handle.terminate(); } catch { /* 已退出 */ }
+      }
+      if (entry.client !== undefined) {
+        try { entry.client.end(); } catch { /* 已断开 */ }
+      }
+      if (typeof entry.childId === 'string') {
+        const child = builds.get(entry.childId);
+        if (child !== undefined) await cancelTask(child, visited);
+      }
+      if (entry.handle !== undefined && typeof entry.handle.waitForExit === 'function') {
+        try {
+          await Promise.race([entry.handle.waitForExit(), sleep(2500)]);
+        } catch {
+          /* 已退出 */
+        }
+      }
+    }
+
+    /**
+     * 清除任务条目（单个「清除」和「一键清除」共用）。
+     * 运行中的任务会先中断再移除；没有 force 时只返回 needsConfirm，不动任何任务。
+     */
+    async function clearTasks(ids, force, root) {
+      const targets = [];
+      const seenIds = new Set();
+      for (const id of ids) {
+        if (typeof id !== 'string' || id === '' || seenIds.has(id)) continue;
+        seenIds.add(id);
+        const build = builds.get(id);
+        if (build !== undefined) targets.push({ kind: 'build', entry: build });
+        const run = processes.get(id);
+        if (run !== undefined) targets.push({ kind: 'run', entry: run });
+      }
+      const live = targets.filter((target) => isLiveEntry(target.entry));
+      if (live.length > 0 && force !== true) {
+        return {
+          ok: false,
+          needsConfirm: true,
+          running: live.map((target) => ({ id: target.entry.id, name: target.entry.name })),
+        };
+      }
+      let interrupted = 0;
+      for (const target of targets) {
+        if (!isLiveEntry(target.entry)) continue;
+        interrupted += 1;
+        if (target.kind === 'run') {
+          try {
+            await stop(target.entry.id, root);
+          } catch {
+            // 停止失败也要把条目清掉，否则它会永远卡在列表里
+            processes.delete(target.entry.id);
+            await forgetRun(root, target.entry.id);
+          }
+        } else {
+          await cancelTask(target.entry);
+        }
+      }
+      for (const target of targets) {
+        if (target.kind === 'run') {
+          processes.delete(target.entry.id);
+          await forgetRun(root, target.entry.id);
+        } else {
+          builds.delete(target.entry.id);
+        }
+      }
+      return { ok: true, cleared: targets.length, interrupted };
+    }
+
     /**
      * DSH 重启后接管仍在本机跑着的服务：state.json 里有记录 + 端口仍在监听 → 建一条
      * 「接管」条目放进 processes，面板就能显示成运行中，并能直接停止。
@@ -1772,12 +1869,12 @@ const plugin = {
       const done = entry.handle.done;
       if (done !== undefined && typeof done.then === 'function') {
         done.then((result) => {
-          entry.state = result?.exitCode === 0 ? 'success' : 'failed';
+          entry.state = entry.cancelRequested === true ? 'stopped' : result?.exitCode === 0 ? 'success' : 'failed';
           entry.exitCode = result?.exitCode;
           tailOf(entry);
         }, (error) => {
-          entry.state = 'failed';
-          entry.error = error instanceof Error ? error.message : String(error);
+          entry.state = entry.cancelRequested === true ? 'stopped' : 'failed';
+          if (entry.cancelRequested !== true) entry.error = error instanceof Error ? error.message : String(error);
         });
       }
       return entry;
@@ -1904,11 +2001,37 @@ const plugin = {
       log(`产物：${artifact}`);
       void (async () => {
         try {
-          const result = await uploadArtifact({ project, target, config, artifact, log, session });
+          if (entry.cancelRequested === true) {
+            entry.state = 'stopped';
+            return;
+          }
+          const result = await uploadArtifact({
+            project,
+            target,
+            config,
+            artifact,
+            log,
+            session,
+            onClient: (client) => {
+              entry.client = client;
+              if (entry.cancelRequested === true) {
+                try { client.end(); } catch { /* 已断开 */ }
+              }
+            },
+            isCancelled: () => entry.cancelRequested === true,
+          });
+          if (entry.cancelRequested === true) {
+            entry.state = 'stopped';
+            return;
+          }
           entry.state = 'success';
           entry.remote = result.remote;
           if (result.containerStatus !== undefined) entry.containerStatus = result.containerStatus;
         } catch (error) {
+          if (entry.cancelRequested === true) {
+            entry.state = 'stopped';
+            return;
+          }
           entry.state = 'failed';
           entry.error = error instanceof Error ? error.message : String(error);
           log(`✗ 失败：${entry.error}`);
@@ -1962,11 +2085,28 @@ const plugin = {
       };
       void (async () => {
         try {
+          if (entry.cancelRequested === true) {
+            entry.state = 'stopped';
+            log('已取消');
+            return;
+          }
           log(`① 打包${options?.fast === true ? '（快速，不带 -am）' : ''}${options?.clean === true ? ' +clean' : ''} …`);
           const buildEntry = project.kind === 'node'
             ? await buildNode(project, root)
             : await build(project.modulePath, options?.clean === true, root, options?.fast === true);
+          entry.childId = buildEntry.id;
+          if (entry.cancelRequested === true) {
+            await cancelTask(buildEntry);
+            entry.state = 'stopped';
+            log('已取消');
+            return;
+          }
           await waitEntry(buildEntry, 40 * 60_000, log, entry);
+          if (entry.cancelRequested === true) {
+            entry.state = 'stopped';
+            log('已取消');
+            return;
+          }
           if (buildEntry.state !== 'success') {
             entry.state = 'failed';
             entry.error = `打包失败（exit ${String(buildEntry.exitCode ?? '?')}）`;
@@ -1977,17 +2117,35 @@ const plugin = {
           entry.artifact = buildEntry.name;
           log('② 部署 …');
           const deployEntry = await deployProject(project, root);
+          entry.childId = deployEntry.id;
+          if (entry.cancelRequested === true) {
+            await cancelTask(deployEntry);
+            entry.state = 'stopped';
+            log('已取消');
+            return;
+          }
           await waitEntry(deployEntry, 40 * 60_000, log, entry);
+          if (entry.cancelRequested === true) {
+            entry.state = 'stopped';
+            log('已取消');
+            return;
+          }
           if (deployEntry.state !== 'success') {
             entry.state = 'failed';
             entry.error = `部署失败：${String(deployEntry.error ?? '见日志')}`;
             log(`✗ ${entry.error}`);
             return;
           }
+          entry.childId = undefined;
           entry.state = 'success';
           entry.containerStatus = deployEntry.containerStatus;
           log('✔ 发布完成');
         } catch (error) {
+          if (entry.cancelRequested === true) {
+            entry.state = 'stopped';
+            log('已取消');
+            return;
+          }
           entry.state = 'failed';
           entry.error = error instanceof Error ? error.message : String(error);
           log(`✗ ${entry.error}`);
@@ -2405,10 +2563,24 @@ const plugin = {
         handler: async (req, res) => {
           try {
             const body = await readJsonBody(req);
-            if (typeof body.id !== 'string') throw new Error('缺少 id');
-            processes.delete(body.id);
-            builds.delete(body.id);
-            sendJson(res, 200, { ok: true });
+            if (typeof body.id !== 'string' || body.id === '') throw new Error('缺少 id');
+            const result = await clearTasks([body.id], body.force === true, effectiveRoot(body.root));
+            sendJson(res, 200, result);
+          } catch (error) {
+            sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) });
+          }
+        },
+      },
+      {
+        path: `${PREFIX}/clear-tasks`,
+        handler: async (req, res) => {
+          try {
+            const body = await readJsonBody(req);
+            const ids = Array.isArray(body.ids)
+              ? body.ids.filter((item) => typeof item === 'string' && item !== '').slice(0, 200)
+              : [];
+            const result = await clearTasks(ids, body.force === true, effectiveRoot(body.root));
+            sendJson(res, 200, result);
           } catch (error) {
             sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) });
           }

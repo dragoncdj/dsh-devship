@@ -1,5 +1,5 @@
-url: https://github.com/YOUR_GITHUB_USER/dsh-devship
-name: YOUR_GITHUB_USER/dsh-devship
+url: https://github.com/dragoncdj/dsh-devship
+name: dragoncdj/dsh-devship
 category: dev
 description:
   en: Right-sidebar console that scans the workspace for runnable Maven modules and Vite frontends, then starts, stops, packages, deploys to a remote host over SSH and restarts the docker container.

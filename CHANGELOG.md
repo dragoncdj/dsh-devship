@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1
+
+- **UI**: 「执行任务」列表新增「一键清除」，一次清掉所有打包 / 部署 / 发布记录（单个「清除」也走同一套逻辑）
+- **Fix**: 以前清除运行中的任务只是把条目从列表里删掉，进程 / 上传还在后台跑且失去管理；现在先确认「确定清除运行中的任务？清除将中断此任务。」，确认后终止子进程、断开 SSH 上传、递归中断发布中的子任务，再移除条目
+- **API**: 新增 `/clear-tasks`（`ids` + `force`）；`/forget` 复用同一实现，未确认运行中任务时返回 `needsConfirm`
+
 ## 1.1.0
 
 - **Perf**: `/status` no longer re-scans the workspace and no longer blocks the host event loop

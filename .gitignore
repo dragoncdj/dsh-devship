@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.tgz
 .dsh-devship/
+.dsh-ops-update-*.lock
+deploy.log

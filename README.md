@@ -2,12 +2,26 @@
 
 在 DSH **右侧栏**里多出一个「应用运行」标签页，列出**当前工作区可启动的项目**，像 IDEA 的启动配置一样一键启动 / 停止 / 重启，并支持 Maven 打包、实时看日志尾部。
 
+## 安装
+
+```powershell
+# DSH Desktop
+dsh plugin --profile desktop add dsh-devship
+
+# dsh web
+dsh plugin --profile web add dsh-devship
+```
+
+装完重启 DSH，右侧栏出现「应用运行」页签。开发时也可以直接指向本地目录（改代码后重启即生效）：
+`dsh plugin --profile desktop add E:\workspace\dsh-devship`。
+
 ## 面板在哪
 
 - 右侧栏（会话右边那列）出现一个「应用运行」页签，插件激活后自动打开；关掉后可从右侧栏的「+」菜单里重新打开；
 - 面板顶部显示工作区路径、Profile 选择（默认 dev / local）、clean 开关、刷新、全量打包；
 - 每个项目一张卡片：勾选框、状态点、类型徽标（Java / 前端）、端口、实际会执行的命令、`启动 / 停止 / 打包 / 日志 / 清除 / 隐藏`；
 - **批量操作**：卡片前的勾选框 + 顶部「全选 / 启动选中 / 停止选中」；批量启动按顺序一个个来（避免多个 Maven 同时写本地仓库），失败的会汇总提示「哪个项目 + 什么原因」；
+- **一键清除**：底部「执行任务」列表右上角一次清掉所有打包 / 部署 / 发布记录；如果其中有正在跑的任务，先弹确认「确定清除运行中的任务？清除将中断此任务。」，确认后先中断子进程 / SSH 上传，再把条目移除（不再出现「列表里没了、进程还在后台跑」）；
 - **隐藏服务**：每行「隐藏 / 取消隐藏」，隐藏列表持久化在 `<工作区>/.dsh-devship/prefs.json`；顶部按需出现「显示已隐藏 (n)」开关，隐藏项半透明显示；
 - 端口被**外部实例**（IDEA / 终端起的）占用时，该行会标「端口占用」，点启动会先给出明确提示而不是白跑一遍 Maven；
 - 标签页 `keepMounted`，切走再切回不会丢轮询状态；每 2.5s 拉一次运行状态与日志尾部。
@@ -63,8 +77,8 @@ JDK 按根 pom 的 `java.version` 找 `~/.jdks`、`C:\Program Files\Java`、Adop
 {
   "host": "10.0.0.9", "port": 22, "user": "root", "password": "***",
   "targets": {
-    "yudao-server": { "remoteDir": "/data/apps/jyx/server" },
-    "yudao-ui/yudao-ui-pos-web": { "remoteDir": "/data/apps/jyx/web/pos" }
+    "yudao-server": { "remoteDir": "/data/apps/demo/server" },
+    "yudao-ui/yudao-ui-pos-web": { "remoteDir": "/data/apps/demo/web/pos" }
   }
 }
 ```
@@ -152,7 +166,7 @@ DSH 重启后，面板每轮 `/status` 会做一次接管：
 
 ## 交互通道
 
-Host 半用 `ctx.webServer` 注册同源 HTTP 路由（`/dsh-devship/list|status|launch|stop|build|forget|client-report`），
+Host 半用 `ctx.webServer` 注册同源 HTTP 路由（`/dsh-devship/list|status|launch|stop|build|forget|clear-tasks|client-report`），
 Client 半用 `fetch` 调用；进程由 `ctx.subprocess` 托管，插件卸载时会终止自己启动的子进程。
 
 ## 踩坑记录：本地插件必须导出 `./package.json`
@@ -178,7 +192,7 @@ DSH 组装前端模块图时会 `require.resolve('<包名>/package.json')` 定�
 
 ## 实测记录（2026-10-19，本机）
 
-- `/dsh-devship/list`：root = `E:\workspace\jyx-workspace\jyx-erp`，识别 8 个项目，端口 48080/48083/48081/48082/48088/48089 + 两个前端。
+- `/dsh-devship/list`：在一个 Maven 多模块工作区（根 pom + 二级 `xxx-server` 模块 + 两个 Vite 前端）里识别出 8 个项目，端口 48080/48083/48081/48082/48088/48089。
 - `/dsh-devship/version` 诊断：`required java=25`，选中 `C:\Users\Administrator\.jdks\ms-25.0.4`（`JAVA_HOME` 是 17 时也能自动换）；`mvn` 命中 `D:\ProgramFiles\apache-maven-3.9.15\bin\mvn.cmd`（PATH 里没有 mvn）。
 - `/dsh-devship/launch` + `/status` + `/stop`（pos-web）：`pnpm dev` → Vite ready（81 端口）→ 停止后进程退出、端口释放。
 - `/dsh-devship/build`（yudao-framework/yudao-common）：`BUILD SUCCESS`，exit 0，日志尾部实时回传。

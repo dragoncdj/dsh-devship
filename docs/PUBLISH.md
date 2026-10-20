@@ -9,35 +9,24 @@
 |---|---|
 | `package.json` 等（仓库根） | 插件本体，同时也是本地 DSH 的安装目录（profile 里是 junction 指向这里） |
 | `dsh-devship-<version>.tgz` | `npm pack` 产物，可挂 GitHub Release（不发 npm 时用） |
-| `docs/awesome-entry/dsh-devship.yml` | 提给 awesome-dsh-plugin 的条目文件 |
+| `docs/awesome-entry/dragoncdj__dsh-devship.yml` | 提给 awesome-dsh-plugin 的条目文件（文件名就是它要的名字） |
 | `docs/PUBLISH.md` | 本文 |
+
+仓库：<https://github.com/dragoncdj/dsh-devship> · npm 包名：`dsh-devship`（已确认 registry 上未被占用）
 
 ---
 
-## 0. 换掉 GitHub 用户名占位
-
-`package.json` 的 `repository` / `homepage` / `bugs` 与 `README.md` 里还写着 `YOUR_GITHUB_USER`：
-
-```powershell
-cd E:\workspace\dsh-devship
-$owner = '你的GitHub用户名'
-foreach ($f in 'package.json','README.md') {
-  (Get-Content $f -Raw) -replace 'YOUR_GITHUB_USER', $owner | Set-Content $f -Encoding utf8 -NoNewline
-}
-(Get-Content docs\awesome-entry\dsh-devship.yml) -replace 'YOUR_GITHUB_USER', $owner |
-  Set-Content docs\awesome-entry\dsh-devship.yml -Encoding utf8
-```
-
 ## 1. 建 GitHub 仓库并推送
 
-GitHub 上新建 **public** 仓库 `dsh-devship`（不要勾 README / .gitignore / license，本地都有了）：
+GitHub 上新建 **public** 仓库 `dsh-devship`（不要勾 README / .gitignore / license，本地都有了）。
+本地分支是 `master`，推上去时改名成 `main`：
 
 ```powershell
 cd E:\workspace\dsh-devship
-git remote add origin https://github.com/你的GitHub用户名/dsh-devship.git
+git remote add origin https://github.com/dragoncdj/dsh-devship.git
 git branch -M main
 git push -u origin main
-git push origin v1.1.0        # 可选：把 tag 也推上去
+git push origin v1.1.1        # 把 tag 也推上去
 ```
 
 推完到仓库页 **About → Topics** 加 **`dsh-plugin`**（收录硬性要求）。
@@ -57,13 +46,13 @@ npm publish --access public
 > 不发 npm 也能收录，但桌面端用户装不了。走这条路线的话，把 tgz 挂到 GitHub Release，
 > 并在条目里加：
 > ```yaml
-> tarball: https://github.com/你的GitHub用户名/dsh-devship/releases/download/v1.1.0/dsh-devship-1.1.0.tgz
+> tarball: https://github.com/dragoncdj/dsh-devship/releases/download/v1.1.1/dsh-devship-1.1.1.tgz
 > ```
 
 ## 3. 提 PR 到 awesome-dsh-plugin
 
 1. Fork https://github.com/awesome-dsh-plugin/awesome-dsh-plugin
-2. 新增**一个**文件：`data/plugins/<你的用户名>__dsh-devship.yml`，内容 = `docs/awesome-entry/dsh-devship.yml`
+2. 新增**一个**文件：`data/plugins/dragoncdj__dsh-devship.yml`，内容 = `docs/awesome-entry/dragoncdj__dsh-devship.yml`
 3. 不要手改两个 README（由脚本生成，合并后 CI 自动重建）
 
 PR 描述模板：
@@ -74,14 +63,21 @@ runnable Maven modules and Vite frontends of the current workspace and lets you
 start/stop them, package them with Maven/pnpm, deploy the artifacts to a remote
 host over SSH, and restart the corresponding docker container.
 
-- repo: https://github.com/你的GitHub用户名/dsh-devship
+- repo: https://github.com/dragoncdj/dsh-devship
 - package.json declares dsh.bundle + dsh.client (patch: ./cordis.patch.yml)
 - npm: dsh-devship
 - category: dev
 ```
 
-CI 依次检查：条目数量（≤3）、`dsh.bundle` 是否存在、仓库年龄 ≥1 天、awesome-lint 与站点构建。
-之后维护者会读源码核对描述是否属实。
+CI 依次检查：条目数量（≤3）、`dsh.bundle` 是否存在、**仓库年龄 ≥1 天**、awesome-lint 与站点构建。
+之后维护者会读源码核对描述是否属实——所以第 1 步推完仓库，至少等一天再提这个 PR。
+
+条目规则（来自 contributing.md，已核对）：
+
+- `url` 必须与仓库完全一致，`name` 是 `dragoncdj/dsh-devship`，`category` 用 `dev`；
+- 只有 `description.en` 必填，且要**以句号结尾**；`zh` 可选（维护者会补）；
+- 描述里出现 `: `（半角冒号 + 空格）时必须整串加引号，本条目没有这个问题；
+- 条目里不能手写 `npm:`，下载量由 CI 从 registry 自动采集。
 
 ## 4. 收录之后
 
@@ -112,5 +108,6 @@ dsh plugin --profile desktop add E:\workspace\dsh-devship
 
 ```powershell
 node --check index.js; node --check client.js
-tar -tzf dsh-devship-1.1.0.tgz      # 应含 package.json / cordis.patch.yml / index.js / client.js / locale / icon / README / LICENSE
+tar -tzf dsh-devship-1.1.1.tgz   # 应含 package.json / cordis.patch.yml / index.js / client.js / locale / icon / README / LICENSE / CHANGELOG
+npm view dsh-devship             # 发布成功后能查到
 ```

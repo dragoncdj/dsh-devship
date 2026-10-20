@@ -1,6 +1,6 @@
 {
   "name": "dsh-devship",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "DevShip for DeepSeek Harness: a right-sidebar console that lists runnable services in the workspace, starts and stops them, packages with Maven or pnpm, deploys over SSH and restarts the docker container.",
   "type": "module",
   "main": "index.js",
@@ -35,11 +35,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_GITHUB_USER/dsh-devship.git"
+    "url": "git+https://github.com/dragoncdj/dsh-devship.git"
   },
-  "homepage": "https://github.com/YOUR_GITHUB_USER/dsh-devship#readme",
+  "homepage": "https://github.com/dragoncdj/dsh-devship#readme",
   "bugs": {
-    "url": "https://github.com/YOUR_GITHUB_USER/dsh-devship/issues"
+    "url": "https://github.com/dragoncdj/dsh-devship/issues"
   },
   "engines": {
     "dsh": ">=0.2.0-rc.2"

@@ -38,6 +38,9 @@ window.__ModuleLoader__.load({
         build: '打包',
         logs: '日志',
         clear: '清除',
+        tasks: '执行任务',
+        clearAll: '一键清除',
+        clearRunningConfirm: '确定清除运行中的任务？清除将中断此任务。',
         showLog: '展开日志',
         hideLog: '收起日志',
         stateRunning: '运行中',
@@ -117,6 +120,9 @@ window.__ModuleLoader__.load({
         build: 'Package',
         logs: 'Logs',
         clear: 'Clear',
+        tasks: 'Tasks',
+        clearAll: 'Clear all',
+        clearRunningConfirm: 'Clear running tasks? This will interrupt them.',
         showLog: 'Show logs',
         hideLog: 'Hide logs',
         stateRunning: 'running',
@@ -627,6 +633,47 @@ window.__ModuleLoader__.load({
           }
         };
 
+        /** 任务是否还在跑：清除它之前要确认，确认后会先中断。 */
+        const taskLive = (entry) => entry !== undefined
+          && (entry.state === 'running' || entry.state === 'building' || entry.state === 'stopping');
+
+        /**
+         * 清除任务（单个「清除」和「一键清除」共用）。
+         * 运行中的任务先弹确认；Host 端还会再确认一次（needsConfirm），防止面板状态过期。
+         */
+        const clearTasks = async (ids, key) => {
+          if (ids.length === 0) return;
+          const live = ids.some((id) => taskLive(buildMap.get(id)) || taskLive(runningMap.get(id)));
+          if (live && window.confirm(t('clearRunningConfirm')) !== true) return;
+          setBusy((current) => ({ ...current, clearing: true, [key]: true }));
+          setError('');
+          try {
+            let payload = await post('/clear-tasks', { ids, force: live });
+            if (payload.ok !== true && payload.needsConfirm === true) {
+              if (window.confirm(t('clearRunningConfirm')) !== true) return;
+              payload = await post('/clear-tasks', { ids, force: true });
+            }
+            if (payload.ok !== true) {
+              setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+              return;
+            }
+            setSelected((current) => (current !== '' && ids.includes(current) ? '' : current));
+          } catch (failure) {
+            setError(failure instanceof Error ? failure.message : String(failure));
+          } finally {
+            setBusy((current) => {
+              const next = { ...current };
+              delete next.clearing;
+              delete next[key];
+              return next;
+            });
+            // 与 act 一致：先同步一次，再补两次，清除后列表立刻收起来
+            await refreshStatus();
+            window.setTimeout(() => { void refreshStatus(); }, 600);
+            window.setTimeout(() => { void refreshStatus(); }, 1600);
+          }
+        };
+
         const visibleProjects = projects.filter((project) => showHidden || !hiddenSet.has(project.id));
         const checkedIds = visibleProjects.filter((project) => checked[project.id] === true).map((project) => project.id);
         const allChecked = visibleProjects.length > 0 && checkedIds.length === visibleProjects.length;
@@ -862,8 +909,8 @@ window.__ModuleLoader__.load({
                 ? h('button', {
                   type: 'button',
                   style: styles.button,
-                  disabled: busy[project.id + ':forget'] === true,
-                  onClick: () => act(project.id + ':forget', '/forget', { id: project.id }),
+                  disabled: busy.clearing === true,
+                  onClick: () => { void clearTasks([project.id], project.id + ':forget'); },
                 }, busy[project.id + ':forget'] === true ? h(Spinner) : null, t('clear'))
                 : null,
               h('button', {
@@ -1073,6 +1120,16 @@ window.__ModuleLoader__.load({
           builds.length === 0
             ? null
             : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+              h('div', { style: styles.actions },
+                h('span', { style: { fontWeight: 600, fontSize: 12 } }, `${t('tasks')} (${builds.length})`),
+                h('span', { style: styles.spacer }),
+                h('button', {
+                  type: 'button',
+                  style: styles.button,
+                  disabled: busy.clearing === true,
+                  onClick: () => { void clearTasks(builds.map((entry) => entry.id), 'clear:all'); },
+                }, busy['clear:all'] === true ? h(Spinner) : null, t('clearAll')),
+              ),
               builds.map((entry) => h(
                 'div',
                 { key: entry.id, style: styles.card },
@@ -1085,7 +1142,12 @@ window.__ModuleLoader__.load({
                 ),
                 h('div', { style: styles.actions },
                   h('button', { type: 'button', style: styles.button, onClick: () => openLog(entry.id) }, t('logs')),
-                  h('button', { type: 'button', style: styles.button, onClick: () => act(entry.id + ':forget', '/forget', { id: entry.id }) }, t('clear')),
+                  h('button', {
+                    type: 'button',
+                    style: styles.button,
+                    disabled: busy.clearing === true,
+                    onClick: () => { void clearTasks([entry.id], entry.id + ':forget'); },
+                  }, busy[entry.id + ':forget'] === true ? h(Spinner) : null, t('clear')),
                 ),
               )),
             ),
