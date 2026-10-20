@@ -1,0 +1,6 @@
+url: https://github.com/YOUR_GITHUB_USER/dsh-devship
+name: YOUR_GITHUB_USER/dsh-devship
+category: dev
+description:
+  en: Right-sidebar console that scans the workspace for runnable Maven modules and Vite frontends, then starts, stops, packages, deploys to a remote host over SSH and restarts the docker container.
+  zh: 右栏控制台：扫描工作区的 Maven 服务与 Vite 前端，一键启动、停止、打包、部署到测试机并重启容器。
