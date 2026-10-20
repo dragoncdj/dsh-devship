@@ -28,8 +28,8 @@ dsh plugin --profile web add dsh-devship
 
 ## 能识别什么
 
-- **Java**：根 `pom.xml` 的 `<modules>` 里、且 `src/main/java` 下存在 `*Application.java` 的模块（含 `xxx/yudao-module-xxx-server` 这种二级模块）。端口从 `application-dev.yaml` 的顶层 `server.port` 读取。
-- **前端**：根目录或两层子目录里带 `scripts.dev` 的 `package.json`（如 `yudao-ui/*`），用 `pnpm dev` 启动。
+- **Java**：根 `pom.xml` 的 `<modules>` 里、且 `src/main/java` 下存在 `*Application.java` 的模块（含 `父模块/子模块-server` 这种二级模块）。端口从 `application-dev.yaml` 的顶层 `server.port` 读取。
+- **前端**：根目录或两层子目录里带 `scripts.dev` 的 `package.json`（如 `ui/*`、`web/*` 这类前端子目录），用 `pnpm dev` 启动。
 - 扫描结果缓存 4 秒，启动前会重新扫描，新增模块无需重启插件。
 
 ## 启动流程（Java）
@@ -77,8 +77,8 @@ JDK 按根 pom 的 `java.version` 找 `~/.jdks`、`C:\Program Files\Java`、Adop
 {
   "host": "10.0.0.9", "port": 22, "user": "root", "password": "***",
   "targets": {
-    "yudao-server": { "remoteDir": "/data/apps/demo/server" },
-    "yudao-ui/yudao-ui-pos-web": { "remoteDir": "/data/apps/demo/web/pos" }
+    "app-server": { "remoteDir": "/data/apps/demo/server" },
+    "ui/admin-web": { "remoteDir": "/data/apps/demo/web/admin" }
   }
 }
 ```
@@ -87,7 +87,7 @@ JDK 按根 pom 的 `java.version` 找 `~/.jdks`、`C:\Program Files\Java`、Adop
 - 部署用 ssh2 走 SFTP：文件直接 put；目录递归建目录后逐个上传，进度实时写进日志区
 - 批量：「部署选中」按顺序逐个项目部署，失败项汇总提示
 
-实测：连 1.0.0.96 → `mkdir -p` → 上传 → `部署完成：1 个文件` 全链路通过（当时的测试产物已清理；现在配置已清空，等你填测试机地址）。
+实测：连一台测试机 → `mkdir -p` → 上传 → `部署完成：1 个文件` 全链路通过（当时的测试产物已清理；部署配置默认是空的，等你填自己的测试机地址）。
 
 ## 打包 / 发布 / 部署（效率相关）
 
@@ -161,7 +161,7 @@ DSH 重启后，面板每轮 `/status` 会做一次接管：
 ## 已知限制
 
 - 只管理**本插件启动**的进程；IDEA / 终端里起的实例需要先在那边停掉（端口占用会明确提示）。
-- 聚合壳 `yudao-server` 的模块 jar 若已被 repackage 成 fat-jar，命令行启动会缺 Bean；IDEA 直接跑不受影响。需要命令行跑单体时，先 `mvn -pl yudao-server -am clean install -DskipTests -Dspring-boot.repackage.skip=true`。
+- 聚合壳模块（`xxx-server` 这种把业务模块聚成一个可运行包的）：模块 jar 若已被 repackage 成 fat-jar，命令行启动会缺 Bean；IDEA 直接跑不受影响。需要命令行跑单体时，先 `mvn -pl <聚合模块> -am clean install -DskipTests -Dspring-boot.repackage.skip=true`。
 - 前端 dev 端口由 Vite 自己选（占用时自动 +1），插件不接管。
 
 ## 交互通道
@@ -192,10 +192,10 @@ DSH 组装前端模块图时会 `require.resolve('<包名>/package.json')` 定�
 
 ## 实测记录（2026-10-19，本机）
 
-- `/dsh-devship/list`：在一个 Maven 多模块工作区（根 pom + 二级 `xxx-server` 模块 + 两个 Vite 前端）里识别出 8 个项目，端口 48080/48083/48081/48082/48088/48089。
-- `/dsh-devship/version` 诊断：`required java=25`，选中 `C:\Users\Administrator\.jdks\ms-25.0.4`（`JAVA_HOME` 是 17 时也能自动换）；`mvn` 命中 `D:\ProgramFiles\apache-maven-3.9.15\bin\mvn.cmd`（PATH 里没有 mvn）。
-- `/dsh-devship/launch` + `/status` + `/stop`（pos-web）：`pnpm dev` → Vite ready（81 端口）→ 停止后进程退出、端口释放。
-- `/dsh-devship/build`（yudao-framework/yudao-common）：`BUILD SUCCESS`，exit 0，日志尾部实时回传。
-- Java 启动链路（erp-server）：`install` 全绿（JDK 25 编译），`spring-boot:run` 起 JVM 到 Web 容器，端口被占时给出明确提示。
+- `/dsh-devship/list`：在一个 Maven 多模块工作区（根 pom + 二级 `xxx-server` 模块 + 两个 Vite 前端）里识别出 8 个项目，端口全部从各模块的 `application-dev.yaml` 读到。
+- `/dsh-devship/version` 诊断：`required java=25`，选中 `~/.jdks` 里的 JDK 25（`JAVA_HOME` 指的是 17 时也能自动换）；`mvn` 命中本机 Maven 安装目录里的 `mvn.cmd`（PATH 里没有 mvn）。
+- `/dsh-devship/launch` + `/status` + `/stop`（一个 Vite 前端）：`pnpm dev` → Vite ready（自动选端口）→ 停止后进程退出、端口释放。
+- `/dsh-devship/build`（二级公共模块）：`BUILD SUCCESS`，exit 0，日志尾部实时回传。
+- Java 启动链路（一个后端服务模块）：`install` 全绿（JDK 25 编译），`spring-boot:run` 起 JVM 到 Web 容器，端口被占时给出明确提示。
 - 客户端半（最终版）：`client-report` 收到 `apply-start` → `apply-ok` → `open-ok (attempt 3)`，即启动瞬间两次因会话未挂载失败、第三次成功并自动展开右栏；Inspect 确认 `sidebar.right.pane.tab` 的 occupants 含 `dsh-devship.panel`。用户确认面板已出现在右侧栏。
 

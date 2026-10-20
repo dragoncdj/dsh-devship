@@ -1413,7 +1413,7 @@ const plugin = {
           .find((name) => typeof manifest?.scripts?.[name] === 'string' && manifest.scripts[name].trim() !== '');
         if (devKey === undefined) continue;
         const dev = manifest.scripts[devKey];
-        // 打包脚本：优先生产构建，其次 build / build:dev（yudao-ui 系列只有 build:prod 等带后缀的）
+        // 打包脚本：优先生产构建，其次 build / build:dev（很多前端只有 build:prod 这类带后缀的脚本）
         const buildScript = ['build:prod', 'build', 'build:dev', 'build:local']
           .find((name) => typeof manifest?.scripts?.[name] === 'string' && manifest.scripts[name].trim() !== '');
         const rel = toId(root, dir);
@@ -1601,7 +1601,7 @@ const plugin = {
             const env = await javaEnv(root);
             // 先 install 上游模块（子模块 runner 需要仓库里的最新快照）；
             // 关掉 spring-boot repackage，避免模块 jar 变成 BOOT-INF 嵌套包，
-            // 否则聚合壳 yudao-server 运行时看不到模块里的 Bean。
+            // 否则聚合壳模块运行时看不到子模块里的 Bean。
             const depsArgs = ['-pl', project.modulePath, '-am', '-DskipTests', '-Dspring-boot.repackage.skip=true', 'install'];
             const deps = await spawnPhase(executable, 'deps', depsArgs, root, env);
             if (entry.stopRequested === true) {
