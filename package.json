@@ -18,6 +18,7 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
+    "docs/screenshots/panel.png",
     "LICENSE",
     "CHANGELOG.md"
   ],
