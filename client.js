@@ -83,6 +83,8 @@ window.__ModuleLoader__.load({
         detachRun: '关 DSH 不停止',
         detachRunHint: '勾选：服务脱离 DSH 独立运行，关掉 DSH 也不会停；不勾：关 DSH 就一起停',
         fastBuildHint: '不带 -am：只编目标模块，依赖需已 install 过',
+        refreshing: '刷新中…',
+        waitingOutput: '等待输出…',
         releasing: '发布中…',
         empty: '未发现可启动的项目',
         emptyHint: '支持根 pom.xml 里带 *Application 启动类的 Maven 模块，以及带 dev 脚本的 package.json 项目。',
@@ -160,6 +162,8 @@ window.__ModuleLoader__.load({
         detachRun: 'Survive DSH exit',
         detachRunHint: 'checked: service keeps running after DSH exits; unchecked: stops with DSH',
         fastBuildHint: 'skip -am: build only this module, dependencies must be installed',
+        refreshing: 'Refreshing…',
+        waitingOutput: 'Waiting for output…',
         releasing: 'releasing…',
         empty: 'No runnable project found',
         emptyHint: 'Maven modules with a *Application class from the root pom.xml and package.json projects with a dev script are listed here.',
@@ -217,6 +221,18 @@ window.__ModuleLoader__.load({
       tiny: { color: 'var(--dsw-alias-label-tertiary, #8a8a8a)', fontSize: 11 },
       mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 11 },
       spacer: { flex: 1 },
+      /** 小转圈（配合 index 注入的 keyframes）。 */
+      spinner: {
+        display: 'inline-block',
+        width: 10,
+        height: 10,
+        marginRight: 4,
+        borderRadius: '50%',
+        border: '2px solid rgba(128,128,128,.35)',
+        borderTopColor: 'currentColor',
+        verticalAlign: '-1px',
+        animation: 'dshDevshipSpin .7s linear infinite',
+      },
       button: {
         height: 24,
         padding: '0 8px',
@@ -448,6 +464,22 @@ window.__ModuleLoader__.load({
         const [deployContainers, setDeployContainers] = React.useState({});
         const [deployHosts, setDeployHosts] = React.useState([]);
         const [deployNote, setDeployNote] = React.useState('');
+        /** 正在刷新列表（扫描工作区可能要几秒，用转圈给出反馈）。 */
+        const [busyRefresh, setBusyRefresh] = React.useState(false);
+
+        // 转圈用的 keyframes（内联样式写不了 @keyframes，注入一次）
+        React.useEffect(() => {
+          const id = 'dsh-devship-spin';
+          if (typeof document === 'undefined' || document.getElementById(id) !== null) return undefined;
+          const style = document.createElement('style');
+          style.id = id;
+          style.textContent = '@keyframes dshDevshipSpin{to{transform:rotate(360deg)}}';
+          document.head.appendChild(style);
+          return undefined;
+        }, []);
+
+        /** 转圈（跟随字号颜色）。 */
+        const Spinner = () => h('span', { style: styles.spinner, 'aria-hidden': 'true' });
 
         const hiddenSet = React.useMemo(() => new Set(hidden), [hidden]);
 
@@ -462,32 +494,37 @@ window.__ModuleLoader__.load({
           return map;
         }, [builds]);
 
-        const refreshList = React.useCallback(async () => {
-          const payload = await post('/list');
-          if (payload.ok === true) {
-            const list = Array.isArray(payload.projects) ? payload.projects : [];
-            setProjects(list);
-            setRoot(typeof payload.root === 'string' ? payload.root : '');
-            setHidden(Array.isArray(payload.hidden) ? payload.hidden : []);
-            // 已不存在的项目从勾选集合里剔除
-            setChecked((current) => {
-              const ids = new Set(list.map((project) => project.id));
-              const next = {};
-              let changed = false;
-              for (const [id, value] of Object.entries(current)) {
-                if (value === true && ids.has(id)) next[id] = true;
-                else changed = true;
+        const refreshList = React.useCallback(async (force) => {
+          setBusyRefresh(true);
+          try {
+            const payload = await post('/list', force === true ? { force: true } : undefined);
+            if (payload.ok === true) {
+              const list = Array.isArray(payload.projects) ? payload.projects : [];
+              setProjects(list);
+              setRoot(typeof payload.root === 'string' ? payload.root : '');
+              setHidden(Array.isArray(payload.hidden) ? payload.hidden : []);
+              // 已不存在的项目从勾选集合里剔除
+              setChecked((current) => {
+                const ids = new Set(list.map((project) => project.id));
+                const next = {};
+                let changed = false;
+                for (const [id, value] of Object.entries(current)) {
+                  if (value === true && ids.has(id)) next[id] = true;
+                  else changed = true;
+                }
+                return changed ? next : current;
+              });
+              const wanted = resolveRoot();
+              if (list.length === 0 && typeof wanted === 'string' && typeof payload.root === 'string' && payload.root !== wanted) {
+                setError(t('staleHost'));
+              } else {
+                setError('');
               }
-              return changed ? next : current;
-            });
-            const wanted = resolveRoot();
-            if (list.length === 0 && typeof wanted === 'string' && typeof payload.root === 'string' && payload.root !== wanted) {
-              setError(t('staleHost'));
             } else {
-              setError('');
+              setError(typeof payload.error === 'string' ? payload.error : 'list failed');
             }
-          } else {
-            setError(typeof payload.error === 'string' ? payload.error : 'list failed');
+          } finally {
+            setBusyRefresh(false);
           }
         }, [t]);
 
@@ -529,7 +566,11 @@ window.__ModuleLoader__.load({
               delete next[key];
               return next;
             });
+            // 先同步一次（多数动作 Host 侧已有结果），再用短间隔补两次，
+            // 让「点完立刻出现」而不是等 2.5s 的常规轮询
             await refreshStatus();
+            window.setTimeout(() => { void refreshStatus(); }, 600);
+            window.setTimeout(() => { void refreshStatus(); }, 1600);
           }
         }, [refreshStatus, t]);
 
@@ -810,7 +851,7 @@ window.__ModuleLoader__.load({
                   disabled: isBusy || (building !== undefined && building.state === 'running'),
                   title: project.kind === 'node' ? `pnpm run ${project.buildScript ?? 'build'}` : undefined,
                   onClick: () => { openLog(buildKey); void act(buildKey, '/build', { projectId: project.id, clean, fast: fastBuild }); },
-                }, t('build'))
+                }, busy[buildKey] === true ? h(Spinner) : null, busy[buildKey] === true ? t('working') : t('build'))
                 : null,
               h('button', {
                 type: 'button',
@@ -821,8 +862,9 @@ window.__ModuleLoader__.load({
                 ? h('button', {
                   type: 'button',
                   style: styles.button,
+                  disabled: busy[project.id + ':forget'] === true,
                   onClick: () => act(project.id + ':forget', '/forget', { id: project.id }),
-                }, t('clear'))
+                }, busy[project.id + ':forget'] === true ? h(Spinner) : null, t('clear'))
                 : null,
               h('button', {
                 type: 'button',
@@ -836,7 +878,7 @@ window.__ModuleLoader__.load({
                   disabled: isBusy || busy['deploy:' + project.id] === true,
                   title: `${t('deployTarget')}: ${project.deploy.remoteDir}`,
                   onClick: () => { openLog('deploy:' + project.id); void act('deploy:' + project.id, '/deploy', { projectId: project.id }); },
-                }, t('deploy'))
+                }, busy['deploy:' + project.id] === true ? h(Spinner) : null, busy['deploy:' + project.id] === true ? t('working') : t('deploy'))
                 : null,
               typeof project.deploy === 'object' && project.deploy !== null
                 ? h('button', {
@@ -845,7 +887,7 @@ window.__ModuleLoader__.load({
                   disabled: isBusy || busy['release:' + project.id] === true,
                   title: `打包 → 部署${project.deploy.container === undefined ? '' : ` → 重启 ${project.deploy.container}`}`,
                   onClick: () => { openLog('release:' + project.id); void act('release:' + project.id, '/release', { projectId: project.id, clean, fast: fastBuild }); },
-                }, t('release'))
+                }, busy['release:' + project.id] === true ? h(Spinner) : null, busy['release:' + project.id] === true ? t('releasing') : t('release'))
                 : null,
             ),
           );
@@ -858,7 +900,12 @@ window.__ModuleLoader__.load({
             h('span', { style: styles.title }, t('title')),
             h('span', { style: styles.spacer }),
             h('button', { type: 'button', style: styles.button, onClick: toggleDeployConfig }, t('deployConfig')),
-            h('button', { type: 'button', style: styles.button, onClick: () => { refreshList(); refreshStatus(); } }, t('refresh')),
+            h('button', {
+              type: 'button',
+              style: styles.button,
+              disabled: busyRefresh,
+              onClick: () => { void refreshList(true); void refreshStatus(); },
+            }, busyRefresh ? h(Spinner) : null, busyRefresh ? t('refreshing') : t('refresh')),
           ),
           h('div', { style: { ...styles.tiny, ...styles.mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: root }, root),
           h('div', { style: styles.actions },
@@ -890,7 +937,7 @@ window.__ModuleLoader__.load({
               style: styles.button,
               disabled: busy['build:<root>'] === true,
               onClick: () => { openLog('build:<root>'); void act('build:<root>', '/build', { modulePath: '', clean, fast: fastBuild }); },
-            }, t('buildAll')),
+            }, busy['build:<root>'] === true ? h(Spinner) : null, t('buildAll')),
           ),
           h('div', { style: styles.actions },
             h('input', {
@@ -914,25 +961,25 @@ window.__ModuleLoader__.load({
               style: styles.buttonPrimary,
               disabled: busy.batch === true || checkedIds.length === 0,
               onClick: () => runBatch('/launch-batch', checkedIds),
-            }, busy.batch === true ? t('working') : `${t('startSelected')}${checkedIds.length === 0 ? '' : ` (${checkedIds.length})`}`),
+            }, busy.batch === true ? h(Spinner) : null, busy.batch === true ? t('working') : `${t('startSelected')}${checkedIds.length === 0 ? '' : ` (${checkedIds.length})`}`),
             h('button', {
               type: 'button',
               style: styles.buttonDanger,
               disabled: busy.batch === true || checkedIds.length === 0,
               onClick: () => runBatch('/stop-batch', checkedIds),
-            }, t('stopSelected')),
+            }, busy.batch === true ? h(Spinner) : null, t('stopSelected')),
             h('button', {
               type: 'button',
               style: styles.button,
               disabled: busy.batch === true || checkedIds.length === 0,
               onClick: () => runBatch('/deploy-batch', checkedIds),
-            }, t('deploySelected')),
+            }, busy.batch === true ? h(Spinner) : null, t('deploySelected')),
             h('button', {
               type: 'button',
               style: styles.buttonPrimary,
               disabled: busy.batch === true || checkedIds.length === 0,
               onClick: () => runBatch('/release-batch', checkedIds),
-            }, t('releaseSelected')),
+            }, busy.batch === true ? h(Spinner) : null, t('releaseSelected')),
             h('span', { style: styles.spacer }),
             hidden.length === 0
               ? null
@@ -1054,7 +1101,9 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: styles.button, onClick: () => setShowLog((value) => !value) }, showLog ? t('hideLog') : t('showLog')),
           ),
           logNote === '' ? null : h('div', { style: { ...styles.tiny, ...styles.mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: logNote }, logNote),
-          showLog ? h('pre', { ref: logRef, style: styles.logBox }, tail === '' ? t('noLog') : tail) : null,
+          showLog
+            ? h('pre', { ref: logRef, style: styles.logBox }, tail !== '' ? tail : (selectedEntry === undefined ? t('noLog') : (busy[selected] === true ? t('waitingOutput') : t('noLog'))))
+            : null,
         );
       }
 

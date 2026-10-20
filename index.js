@@ -32,7 +32,7 @@ const SKIP_DIRS = new Set([
   '.dsh-plugins', '.vscode', 'logs', 'tmp', 'coverage',
 ]);
 /** 扫描结果缓存时长，避免每次轮询都读盘。 */
-const SCAN_TTL_MS = 4000;
+const SCAN_TTL_MS = 300000;
 /** spawn 的 SIGTERM 宽限期。 */
 const GRACE_MS = 3000;
 
@@ -265,6 +265,37 @@ function pidAlive(pid) {
   }
 }
 
+/**
+ * 异步判活 + 4s 缓存。
+ * /status 每 2.5s 调一次，之前每个 detached 条目都同步跑一次 tasklist（7 个服务≈1.5s），
+ * 直接把宿主事件循环堵住，所有接口都变慢。
+ */
+const pidAliveCache = new Map();
+function pidAliveAsync(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve(false);
+  const hit = pidAliveCache.get(pid);
+  const now = Date.now();
+  if (hit !== undefined && now - hit.at < 4000) return Promise.resolve(hit.alive);
+  if (process.platform !== 'win32') {
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      alive = false;
+    }
+    pidAliveCache.set(pid, { alive, at: now });
+    return Promise.resolve(alive);
+  }
+  return new Promise((resolve) => {
+    execFile('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { windowsHide: true, timeout: 5000 }, (error, stdout) => {
+      // 取不到答案时不给「已死」的结论（否则一次 tasklist 抖动就把 state.json 里的记录删了）
+      const alive = error === null || error === undefined ? String(stdout ?? '').includes(String(pid)) : undefined;
+      pidAliveCache.set(pid, { alive, at: Date.now() });
+      resolve(alive);
+    });
+  });
+}
+
 /** 从 pid 文件读 pid 并判断进程是否还活着。 */
 async function pidAliveFromFile(pidFile) {
   if (typeof pidFile !== 'string' || pidFile === '') return undefined;
@@ -433,7 +464,9 @@ function tailOf(entry) {
   return entry.tail;
 }
 
-function publicEntry(entry) {
+function publicEntry(entry, tailLimit) {
+  const full = tailOf(entry);
+  const tail = Number.isInteger(tailLimit) && full.length > tailLimit ? full.slice(-tailLimit) : full;
   return {
     id: entry.id,
     name: entry.name,
@@ -448,7 +481,7 @@ function publicEntry(entry) {
     ...entry.adopted === true ? { adopted: true, port: entry.port } : {},
     ...Number.isInteger(entry.pid) ? { pid: entry.pid } : {},
     ...entry.detached === true ? { detached: true } : {},
-    tail: tailOf(entry),
+    tail,
   };
 }
 
@@ -1152,6 +1185,8 @@ const plugin = {
     /** buildKey -> 打包任务条目 */
     const builds = new Map();
     let scanCache;
+    /** 正在跑的扫描（避免并发重复扫描）。 */
+    let scanRunning;
     let scanAt = 0;
 
     /**
@@ -1274,10 +1309,23 @@ const plugin = {
       return jdk.javaHome === undefined ? {} : { JAVA_HOME: jdk.javaHome };
     }
 
-    /** 扫描工作区，返回项目清单（带缓存）。 */
-    async function scan(root) {
+    /**
+     * 扫描工作区，返回项目清单（带缓存）。
+     * @param {boolean} [force] 忽略缓存重新扫描（面板「刷新」用）
+     *
+     * 注意：sandbox 下每次 readdir/stat 都有额外开销，整个扫描在真实宿主里可能到几秒，
+     * 所以这里缓存 5 分钟；/status 这类高频接口绝不能再触发重新扫描。
+     */
+    async function scan(root, force) {
       const now = Date.now();
-      if (scanCache !== undefined && scanCache.root === root && now - scanAt < SCAN_TTL_MS) return scanCache;
+      if (force !== true && scanCache !== undefined && scanCache.root === root && now - scanAt < SCAN_TTL_MS) {
+        return scanCache;
+      }
+      if (force !== true && scanCache !== undefined && scanRunning !== undefined && scanCache.root === root) {
+        // 已有一次扫描在跑，等它（避免并发重复扫）
+        return await scanRunning;
+      }
+      const task = (async () => {
       const projects = [];
       const seen = new Set();
       const add = (project) => {
@@ -1322,9 +1370,11 @@ const plugin = {
       const packageDirs = [];
       const rootPackage = await readText(join(root, 'package.json'));
       if (rootPackage !== undefined) packageDirs.push(root);
-      // 广度优先找 package.json（最多 4 层，跳过 node_modules/target/dist 等），
-      // 这样 northbound/src/main/webapp 这种标准 Maven 布局里的前端也能扫到
+      // 广度优先找 package.json（最多 4 层，跳过 node_modules/target/dist 等）。
+      // sandbox 下每次 readdir 都有固定开销，第 3 层起只往下钻「可能放前端」的目录名，
+      // 否则 jyx-erp 这种仓一次扫描要几千次 readdir（实测 9 秒）。
       const NODE_MAX_DEPTH = 4;
+      const PROMISING = /^(?:src|main|webapp|web|front|frontend|ui|client|app|apps|modules|packages|admin|pos)$/u;
       const queue = [{ dir: root, depth: 0 }];
       const visitedDirs = new Set([root]);
       while (queue.length > 0) {
@@ -1332,6 +1382,7 @@ const plugin = {
         if (node.depth >= NODE_MAX_DEPTH) continue;
         for (const child of await listDirectories(node.dir)) {
           if (SKIP_DIRS.has(child) || child.startsWith('.')) continue;
+          if (node.depth >= 2 && !PROMISING.test(child)) continue;
           const childDir = join(node.dir, child);
           if (visitedDirs.has(childDir)) continue;
           visitedDirs.add(childDir);
@@ -1372,8 +1423,15 @@ const plugin = {
       }
 
       scanCache = { root, projects };
-      scanAt = now;
+      scanAt = Date.now();
       return scanCache;
+      })();
+      scanRunning = task;
+      try {
+        return await task;
+      } finally {
+        if (scanRunning === task) scanRunning = undefined;
+      }
     }
 
     function spawnCommon() {
@@ -1681,7 +1739,7 @@ const plugin = {
         const project = projects.find((candidate) => candidate.id === id);
         const port = Number.isInteger(saved?.port) ? saved.port : project?.port;
         // 存活判据：优先 pid（脱离模式一定记录 pid），没有 pid 再看端口
-        const pid = Number.isInteger(saved?.pid) && pidAlive(saved.pid) ? saved.pid : undefined;
+        const pid = Number.isInteger(saved?.pid) && await pidAliveAsync(saved.pid) ? saved.pid : undefined;
         const busy = pid !== undefined
           ? true
           : Number.isInteger(port) ? ports[project?.id ?? id] === true || (await portBusy(port, 200)) : false;
@@ -1943,8 +2001,14 @@ const plugin = {
       const ports = {};
       let scannedProjects = [];
       try {
-        const { projects } = await scan(root);
+        // 只用已有缓存：/status 每 2.5s 调一次，绝不能再触发一次扫描（sandbox 下要好几秒）
+        const cached = scanCache !== undefined && scanCache.root === root ? scanCache : undefined;
+        const projects = cached?.projects ?? [];
         scannedProjects = projects;
+        if (cached === undefined) {
+          // 还没有缓存（面板刚打开）：让客户端先请求 /list，这一轮不探测端口
+          ports.__pending = true;
+        }
         await Promise.all(projects
           .filter((project) => Number.isInteger(project.port))
           .map(async (project) => {
@@ -1962,15 +2026,18 @@ const plugin = {
       // 脱离模式的进程没有 handle.done，靠 pid 判活
       for (const [id, entry] of processes.entries()) {
         if (entry.detached !== true || entry.state !== 'running') continue;
-        if (Number.isInteger(entry.pid) && pidAlive(entry.pid)) continue;
+        const alive = Number.isInteger(entry.pid) ? await pidAliveAsync(entry.pid) : undefined;
+        if (alive !== false) continue; // 活着或状态未知都先保留
         entry.state = 'exited';
         tailOf(entry);
         void forgetRun(root, id);
       }
+      // 轮询响应不能带全量日志：7 个服务 × 100k 字符 ≈ 600KB/2.5s
+      const STATUS_TAIL_MAX = 8000;
       const running = [];
-      for (const entry of processes.values()) running.push(publicEntry(entry));
+      for (const entry of processes.values()) running.push(publicEntry(entry, STATUS_TAIL_MAX));
       const building = [];
-      for (const entry of builds.values()) building.push(publicEntry(entry));
+      for (const entry of builds.values()) building.push(publicEntry(entry, STATUS_TAIL_MAX));
       return {
         root,
         running,
@@ -2081,7 +2148,7 @@ const plugin = {
           try {
             const body = await readJsonBody(req);
             const root = effectiveRoot(body.root);
-            const scanned = await scan(root);
+            const scanned = await scan(root, body.force === true);
             const prefs = await readPrefs(root);
             const deploy = await readDeployConfig(root);
             const projects = scanned.projects.map((project) => {
