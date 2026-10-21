@@ -23,7 +23,8 @@ dsh plugin --profile web add dsh-devship
 - 面板顶部显示工作区路径、Profile 选择（默认 dev / local）、clean 开关、刷新、全量打包；
 - 每个项目一张卡片：勾选框、状态点、类型徽标（Java / 前端）、端口、实际会执行的命令、`启动 / 停止 / 打包 / 日志 / 清除 / 隐藏`；
 - **批量操作**：卡片前的勾选框 + 顶部「全选 / 启动选中 / 停止选中」；批量启动按顺序一个个来（避免多个 Maven 同时写本地仓库），失败的会汇总提示「哪个项目 + 什么原因」；
-- **一键清除**：底部「执行任务」列表右上角一次清掉所有打包 / 部署 / 发布记录；如果其中有正在跑的任务，先弹确认「确定清除运行中的任务？清除将中断此任务。」，确认后先中断子进程 / SSH 上传，再把条目移除（不再出现「列表里没了、进程还在后台跑」）；
+- **一键清除**：底部「执行任务」列表右上角一次清掉所有打包 / 部署 / 发布记录；如果其中有正在跑的任务，按钮就地变成「确认清除？会中断任务」+ 是 / 否（不弹系统对话框，3 秒不点自动收回），点「是」后先中断子进程 / SSH 上传，再把条目移除（不再出现「列表里没了、进程还在后台跑」）；
+- **完成自动清除**：面板上「完成自动清除」一行，打包 / 部署 / 发布各一个开关，加一个延迟（立即 / 5 / 15 / 30 / 60 秒）；勾选的任务类型跑完后自动从「执行任务」列表里移除，日志文件照常落盘保留。开关存在 `<工作区>/.dsh-devship/prefs.json`，由 Host 侧计时，面板关掉也生效；**失败的任务不会自动清除**，避免错误信息跟着条目一起消失；开了自动清除的任务在状态后面显示「N 秒后收起」倒计时；
 - **隐藏服务**：每行「隐藏 / 取消隐藏」，隐藏列表持久化在 `<工作区>/.dsh-devship/prefs.json`；顶部按需出现「显示已隐藏 (n)」开关，隐藏项半透明显示；
 - 端口被**外部实例**（IDEA / 终端起的）占用时，该行会标「端口占用」，点启动会先给出明确提示而不是白跑一遍 Maven；
 - 标签页 `keepMounted`，切走再切回不会丢轮询状态；每 2.5s 拉一次运行状态与日志尾部。
@@ -32,7 +33,7 @@ dsh plugin --profile web add dsh-devship
 
 - **Java**：根 `pom.xml` 的 `<modules>` 里、且 `src/main/java` 下存在 `*Application.java` 的模块（含 `父模块/子模块-server` 这种二级模块）。端口从 `application-dev.yaml` 的顶层 `server.port` 读取。
 - **前端**：根目录或两层子目录里带 `scripts.dev` 的 `package.json`（如 `ui/*`、`web/*` 这类前端子目录），用 `pnpm dev` 启动。
-- 扫描结果缓存 4 秒，启动前会重新扫描，新增模块无需重启插件。
+- 扫描结果缓存 5 分钟（`SCAN_TTL_MS`），同一工作区的重复扫描会合并；面板右上「刷新」按钮强制重新扫描，新增模块无需重启插件。
 
 ## 启动流程（Java）
 
@@ -43,8 +44,9 @@ dsh plugin --profile web add dsh-devship
 
 两个阶段共用一份日志尾部；进入运行阶段时会清掉构建日志，只留应用输出。启动前会用 800ms 探测端口，已被占用就直接提示「可能已在运行」，不再白跑一遍 Maven。
 
-Windows 上启动不会弹黑色控制台窗口：脚本由 `wscript.exe`（GUI 子系统）以 `WScript.Shell.Run(..., 0, True)` 隐藏执行并同步等待，
-退出码照常回传；停止时 `taskkill /T /F` 连带整棵进程树（cmd → mvn → java / pnpm → node）一起结束。
+Windows 上启动不会弹黑色控制台窗口：`.cmd` 由隐藏窗口的 `powershell -WindowStyle Hidden` 执行（DSH 自己起的子进程也是隐藏启动的），
+退出码照常回传。停止时附带模式走 `handle.terminate()`（DSH 的作业对象连带整棵 powershell → cmd → mvn → java / node 一起结束），
+脱离模式用 `taskkill /T /F` 结束整棵树。
 
 日志区固定 260px 高、内部滚动，不随内容伸缩。
 
@@ -61,9 +63,20 @@ Windows 上启动不会弹黑色控制台窗口：脚本由 `wscript.exe`（GUI 
 ```
 
 不写也能用：Maven 依次找 PATH → `M2HOME/MAVEN_HOME/bin` → 常见安装目录 → IDEA 自带 Maven；
-JDK 按根 pom 的 `java.version` 找 `~/.jdks`、`C:\Program Files\Java`、Adoptium 等目录里匹配的版本（`JAVA_HOME` 版本不合适时会自动换）。
+JDK 按根 pom 的 `java.version` 找匹配的版本，常见目录按平台给：Windows 是 `~/.jdks`、`C:\Program Files\Java`、Adoptium / Zulu / Corretto 等；macOS 是 `/Library/Java/JavaVirtualMachines`（含 `Contents/Home` 那一层）和 Homebrew；Linux 是 `/usr/lib/jvm` 与 sdkman（`JAVA_HOME` 版本不合适时会自动换）。
 
 运行时产生的启动脚本放在 `<工作区>/.dsh-devship/`。
+
+面板上的「完成自动清除」开关和隐藏服务列表存在同一个文件 `<工作区>/.dsh-devship/prefs.json`，也可以直接改它：
+
+```json
+{
+  "hidden": ["ui/admin"],
+  "autoClear": { "build": true, "deploy": true, "release": false, "delayMs": 15000 }
+}
+```
+
+`delayMs` 只认 `0 / 5000 / 15000 / 30000 / 60000`（其它值回落到 15000）；自动清除只处理**成功**和**已停止**的收尾，失败的任务留在列表里，仍可手动清除或「一键清除」。
 
 ## 部署（把包发到测试服务器）
 
@@ -86,7 +99,8 @@ JDK 按根 pom 的 `java.version` 找 `~/.jdks`、`C:\Program Files\Java`、Adop
 ```
 
 - 产物默认：Java = `<模块>/target/<artifactId>.jar`，前端 = `dist-prod`/`dist`；可用 `artifact` 覆盖
-- 部署用 ssh2 走 SFTP：文件直接 put；目录递归建目录后逐个上传，进度实时写进日志区
+- 部署用 ssh2 走 SFTP：目录先本地打 tar（不压缩，局域网带宽足，比 gzip 快）→ 传一个包 → 远端解包；tar 不可用时退回 8 路并发逐文件上传；单个 jar 直接 put
+- **上传进度与速度**：任务卡上有进度条 —— 百分比、「已传 / 总量」、实时速度；日志里每 2 秒记一行 `↑ 42% 12.3 MB / 29.1 MB · 4.8 MB/s`，传完一定记最后一行。速度按最近 5 秒的窗口算，不是整轮平均，所以传热了之后不会显示成一个偏低的速度
 - 批量：「部署选中」按顺序逐个项目部署，失败项汇总提示
 
 实测：连一台测试机 → `mkdir -p` → 上传 → `部署完成：1 个文件` 全链路通过（当时的测试产物已清理；部署配置默认是空的，等你填自己的测试机地址）。
@@ -126,11 +140,13 @@ JDK 按根 pom 的 `java.version` 找 `~/.jdks`、`C:\Program Files\Java`、Adop
 
 | 模式 | 启动方式 | DSH 退出后 | 日志 | 停止 |
 |---|---|---|---|---|
-| 勾选（默认，脱离） | 写一个 `.cmd`（输出重定向到 `logs/run-*.detached.log`），用 **WMI Win32_Process.Create** 起进程 | **服务继续跑** | 读日志文件（增量） | `taskkill /PID <pid> /T /F` |
-| 不勾（附带） | 走 ctx.subprocess（管道） | 随 DSH 一起结束 | 管道 | handle.terminate() |
+| 勾选（默认，脱离） | 写一个 `.cmd`（输出重定向到 `logs/run-*.detached.log`），外面套一层 `.ps1` 认领 pid，再用 **WMI Win32_Process.Create** 起 `wscript.exe` 隐藏启动它 | **服务继续跑** | 读日志文件（增量） | `taskkill /PID <pid> /T /F` |
+| 不勾（附带） | 走 ctx.subprocess（管道），由隐藏窗口的 powershell 执行 `.cmd` | 随 DSH 一起结束 | 管道 | handle.terminate() |
 
 脱离模式细节：
 - WMI 起的进程父进程是系统服务（WmiPrvSE），不在 DSH 的作业对象里，所以 DSH 关了也不受影响
+- **全程不弹控制台窗口**：WMI 起的是没有控制台的 `wscript.exe`，它用 `WScript.Shell.Run(..., 0, False)`（窗口样式 0 = 隐藏）起 powershell，powershell 的 cmd 子进程也跟着隐藏。以前 WMI 直接起 `cmd.exe`，服务跑着的时候桌面上会一直挂着一个 cmd 黑窗口
+- 要跟踪的进程是那个 powershell：它第一件事就是把自己的 PID 写进 `run-*-detached.pid`，Host 轮询这个文件认领；WSH 被策略关掉时退回直接起 powershell（`-WindowStyle Hidden`，实测同样没有窗口）
 - 启动脚本只有 ASCII 内容（cmd.exe 按 OEM 代码页解析，中文会破坏批处理语法）
 - 记录 pid 到 `.dsh-devship/state.json`，DSH 重启后据此接管（显示「运行中（接管）」）
 - 代价：脱离模式拿不到退出码（靠 pid 判活），且 **DSH 崩溃/被强杀时进程不会被自动清理**
@@ -168,8 +184,44 @@ DSH 重启后，面板每轮 `/status` 会做一次接管：
 
 ## 交互通道
 
-Host 半用 `ctx.webServer` 注册同源 HTTP 路由（`/dsh-devship/list|status|launch|stop|build|forget|clear-tasks|client-report`），
-Client 半用 `fetch` 调用；进程由 `ctx.subprocess` 托管，插件卸载时会终止自己启动的子进程。
+Host 半用 `ctx.webServer` 注册同源 HTTP 路由（`/dsh-devship/` 下 20 条：`list` `prefs` `status` `launch` `launch-batch` `stop` `stop-batch` `build` `deploy` `deploy-batch` `deploy-config` `release` `release-batch` `log` `log-open` `forget` `clear-tasks` `hide` `version` `client-report`），
+Client 半用 `fetch` 调用；进程由 `ctx.subprocess` 托管，插件卸载时会终止自己启动的子进程、撤掉待执行的自动清除定时器。
+
+## 代码结构
+
+Host 半按职责分文件，依赖单向（state → scan → build → deploy → routes），没有循环 import：
+
+| 文件 | 管什么 |
+| --- | --- |
+| [index.js](index.js) | 装配：把各模块接起来、注册路由、退出时收尾（60 行） |
+| [routes.js](routes.js) | `/dsh-devship/` 下 20 条同源路由；`PROTOCOL` 是协议版本的唯一来源 |
+| [lib/state.js](lib/state.js) | 进程表 / 任务表 / 日志落盘 / pid 判活 / `state.json` / 自动清除 |
+| [lib/scan.js](lib/scan.js) | 工作区发现、`root` 白名单、项目扫描、mvn·pnpm·JDK 定位 |
+| [lib/build.js](lib/build.js) | 启动脚本生成、启动 / 停止、打包、一键清除 |
+| [lib/deploy.js](lib/deploy.js) | SSH 会话、SFTP 上传（带进度）、部署、发布 |
+| [lib/progress.js](lib/progress.js) | 上传进度与速度：纯计算、不碰网络、可单测 |
+| [lib/net.js](lib/net.js) · [lib/fs-scan.js](lib/fs-scan.js) · [lib/prefs.js](lib/prefs.js) · [lib/log.js](lib/log.js) · [lib/util.js](lib/util.js) · [lib/auto-clear.js](lib/auto-clear.js) | 端口探测 / 目录遍历 / 配置读写 / Host 日志 / 小工具 / 任务类别判定 |
+| [client.js](client.js) | 面板界面（React `createElement`，没有构建步骤） |
+
+界面文案在 [client.js](client.js) 里的 `DICT`（中英两份，用 `ctx.locale.register` 注册）；`locale/*.json` 只放插件自身的标题和描述，不是界面文案的来源。
+
+改路由路径或响应结构时：`routes.js` 的 `PROTOCOL` 加 1，`test/routes.test.mjs` 里的路径清单断言会拦住没同步改 client.js 的改动。
+
+## 安全边界
+
+- **`root` 走白名单**：面板请求带的 `root` 只接受「DSH 认得的工作区」——`workspaceRegistry` 里的路径、会话表头的 `cwd`、沙箱策略的 `workspaceRoot`、`process.cwd()`，以及 `prefs.json` 里 `extraRoots` 显式列出的目录。
+  名单外的 `root`（包括相对路径、空串、别处的绝对路径）一律回落到当前工作区：不报错，但也不会去读写那个目录。
+- **逃生口 `extraRoots`**：确实要管别处的目录，就往 `<工作区>/.dsh-devship/prefs.json` 里加：
+
+  ```json
+  { "extraRoots": ["E:/other/project"] }
+  ```
+
+  Host 侧最多缓存 5 秒，面板里保存偏好会立刻让缓存失效。Windows 下比较时忽略大小写和尾部分隔符。
+- **部署密码只留在 Host**：`deploy.json` 里的 `password` 不再回传浏览器，面板只看到 `hasPassword`（存没存过）。
+  保存时密码留空 = 保持已存值；要删干净点「清除已存密码」。`restartCommand` 同样「留空保持、显式清除」。
+- **密码仍是明文**：`deploy.json` 里存的就是明文，比 dsh-ssh 的密钥方式弱一档。测试机优先用 dsh-ssh 的 alias + 密钥，`password` 只当兜底；机器被别人用过就把 `deploy.json` 删掉。
+- **远端命令里的名字都加引号**：容器名进 `docker restart` / `docker ps --filter` / `docker logs` 前一律单引号包住，带空格、`$`、`;` 也只会是一个容器名，不会变成另一条命令。
 
 ## 踩坑记录：本地插件必须导出 `./package.json`
 

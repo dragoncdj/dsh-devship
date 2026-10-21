@@ -4,3 +4,9 @@ dist/
 .dsh-devship/
 .dsh-ops-update-*.lock
 deploy.log
+.tmp-*/
+.tmp-*.mjs
+.tmp-*.js
+.tmp-*.txt
+# 在这个目录里跑 dsh CLI 时 Chromium 会顺手写一个 debug.log
+debug.log

@@ -40,7 +40,17 @@ window.__ModuleLoader__.load({
         clear: '清除',
         tasks: '执行任务',
         clearAll: '一键清除',
-        clearRunningConfirm: '确定清除运行中的任务？清除将中断此任务。',
+        clearConfirmInline: '确认清除？会中断任务',
+        confirmYes: '是',
+        confirmNo: '否',
+        clearIn: '{seconds} 秒后收起',
+        clearAnyNow: '即将收起',
+        progressHint: '上传进度：已传 / 总量 · 速度',
+        autoClearTitle: '完成自动清除',
+        autoClearHint: '勾选的任务类型跑完后自动从「执行任务」里移除（日志文件保留，随时能翻）；失败的任务不会自动清除',
+        autoClearDelay: '延迟',
+        autoClearNow: '立即',
+        autoClearSecondsUnit: '秒',
         showLog: '展开日志',
         hideLog: '收起日志',
         stateRunning: '运行中',
@@ -75,6 +85,9 @@ window.__ModuleLoader__.load({
         deployPort: '端口',
         deployUser: '用户',
         deployPassword: '密码',
+        deployPasswordSaved: '已保存 · 留空表示不改',
+        deployPasswordClear: '清除已存密码',
+        deployPasswordClearHint: '删掉 deploy.json 里存着的密码；下次部署改用密钥，或在这里重新填',
         deployAliasHint: '可选：dsh-ssh 主机别名（留空则用上面的地址）',
         deployTargetsTitle: '各服务部署目录',
         deployRemoteDir: '远端目录（留空 = 不部署）',
@@ -122,7 +135,17 @@ window.__ModuleLoader__.load({
         clear: 'Clear',
         tasks: 'Tasks',
         clearAll: 'Clear all',
-        clearRunningConfirm: 'Clear running tasks? This will interrupt them.',
+        clearConfirmInline: 'Clear running tasks? They will be interrupted.',
+        confirmYes: 'Yes',
+        confirmNo: 'No',
+        clearIn: 'auto-clears in {seconds}s',
+        clearAnyNow: 'auto-clearing…',
+        progressHint: 'Upload progress: transferred / total · speed',
+        autoClearTitle: 'Auto-clear',
+        autoClearHint: 'Checked task types are removed from the task list once they finish (log files are kept); failed tasks stay until cleared manually',
+        autoClearDelay: 'delay',
+        autoClearNow: 'Now',
+        autoClearSecondsUnit: 's',
         showLog: 'Show logs',
         hideLog: 'Hide logs',
         stateRunning: 'running',
@@ -157,6 +180,9 @@ window.__ModuleLoader__.load({
         deployPort: 'port',
         deployUser: 'user',
         deployPassword: 'password',
+        deployPasswordSaved: 'saved · leave blank to keep',
+        deployPasswordClear: 'clear saved password',
+        deployPasswordClearHint: 'remove the password stored in deploy.json; next deploy uses the key, or type a new one here',
         deployAliasHint: 'optional: dsh-ssh alias (leave empty to use the address above)',
         deployTargetsTitle: 'Deploy directories',
         deployRemoteDir: 'remote dir (empty = skip)',
@@ -272,6 +298,21 @@ window.__ModuleLoader__.load({
         fontSize: 11.5,
         whiteSpace: 'nowrap',
       },
+      /** 内联确认（点「清除」后就地变成是/否，不弹系统对话框）。 */
+      inlineConfirm: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '2px 6px',
+        borderRadius: 7,
+        border: '1px solid var(--dsw-alias-state-error-primary, #d92d20)',
+        background: 'var(--dsw-alias-state-error-bg, rgba(217,45,32,.08))',
+        whiteSpace: 'nowrap',
+      },
+      confirmText: {
+        fontSize: 11.5,
+        color: 'var(--dsw-alias-state-error-primary, #d92d20)',
+      },
       input: {
         height: 24,
         borderRadius: 7,
@@ -312,6 +353,21 @@ window.__ModuleLoader__.load({
         flex: '0 0 auto',
       },
       dot: { width: 7, height: 7, borderRadius: 4, flex: '0 0 auto' },
+      progressRow: { display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, minWidth: 0 },
+      progressTrack: {
+        flex: 1,
+        minWidth: 0,
+        height: 6,
+        borderRadius: 4,
+        overflow: 'hidden',
+        background: 'var(--dsw-alias-bg-layer-2, rgba(9,9,11,.07))',
+      },
+      progressFill: {
+        height: '100%',
+        borderRadius: 4,
+        background: 'var(--dsw-alias-state-business-primary, #2f6fed)',
+        transition: 'width .3s ease',
+      },
       actions: { display: 'flex', gap: 5, flexWrap: 'wrap', alignItems: 'center' },
       logBox: {
         // 固定高度：日志区不随内容伸缩，避免面板布局跳动
@@ -433,6 +489,21 @@ window.__ModuleLoader__.load({
         }],
       }), 'dsh-devship: tab type');
 
+      /** 自动清除延迟的档位：和 Host 的 AUTO_CLEAR_DELAYS 保持一致（lib/prefs.js）。 */
+      const AUTO_CLEAR_DELAYS = [0, 5000, 15000, 30000, 60000];
+
+      /** Host 返回的 autoClear 归一化：面板里的开关状态只认这个形状。 */
+      function normalizeAutoClear(value) {
+        const raw = value !== null && typeof value === 'object' ? value : {};
+        const delay = typeof raw.delayMs === 'number' ? raw.delayMs : Number.NaN;
+        return {
+          build: raw.build === true,
+          deploy: raw.deploy === true,
+          release: raw.release === true,
+          delayMs: AUTO_CLEAR_DELAYS.includes(delay) ? delay : 15000,
+        };
+      }
+
       function PanelTitle() {
         return h('span', null, t('title'));
       }
@@ -446,6 +517,9 @@ window.__ModuleLoader__.load({
         const [error, setError] = React.useState('');
         const [busy, setBusy] = React.useState({});
         const [selected, setSelected] = React.useState('');
+        /** 当前选中任务的 id：轮询时告诉 Host「日志只要这条」，别每轮把全部任务的 tail 都端上来。 */
+        const selectedRef = React.useRef('');
+        selectedRef.current = selected;
         const [showLog, setShowLog] = React.useState(false);
         /** 日志操作提示（复制/文件路径）。 */
         const [logNote, setLogNote] = React.useState('');
@@ -460,10 +534,14 @@ window.__ModuleLoader__.load({
         /** 被隐藏的项目 id（Host 端持久化在 .dsh-devship/prefs.json）。 */
         const [hidden, setHidden] = React.useState([]);
         const [showHidden, setShowHidden] = React.useState(false);
+        /** 任务完成自动清除：打包 / 部署 / 发布分别一个开关，Host 端持久化在 .dsh-devship/prefs.json。 */
+        const [autoClear, setAutoClear] = React.useState({ build: false, deploy: false, release: false, delayMs: 15000 });
         /** 部署配置编辑器状态。 */
         const [deployOpen, setDeployOpen] = React.useState(false);
         /** 服务器连接信息：host/port/user/password，alias 可选（dsh-ssh 里的别名）。 */
         const [deployForm, setDeployForm] = React.useState({ host: '', port: '', user: '', password: '', alias: '' });
+        /** Host 只告诉我们「deploy.json 里存没存密码」，明文不进浏览器。 */
+        const [deployHasPassword, setDeployHasPassword] = React.useState(false);
         /** 每个项目的远端目录（空 = 不部署）。 */
         const [deployTargets, setDeployTargets] = React.useState({});
         /** 每个项目的容器名（部署后 docker restart 用，空 = 不重启）。 */
@@ -509,6 +587,7 @@ window.__ModuleLoader__.load({
               setProjects(list);
               setRoot(typeof payload.root === 'string' ? payload.root : '');
               setHidden(Array.isArray(payload.hidden) ? payload.hidden : []);
+              setAutoClear(normalizeAutoClear(payload.autoClear));
               // 已不存在的项目从勾选集合里剔除
               setChecked((current) => {
                 const ids = new Set(list.map((project) => project.id));
@@ -534,27 +613,74 @@ window.__ModuleLoader__.load({
           }
         }, [t]);
 
+        /** Host 只回选中那条的 tail：其余条目这一轮没带，就沿用上轮已经拿到的那份。 */
+        const keepTail = React.useCallback((next, previous) => next.map((entry) => {
+          if (typeof entry.tail === 'string') return entry;
+          const old = previous.find((item) => item.id === entry.id);
+          return old === undefined || typeof old.tail !== 'string' ? entry : { ...entry, tail: old.tail };
+        }), []);
+
         const refreshStatus = React.useCallback(async () => {
-          const payload = await post('/status');
+          const payload = await post('/status', { logFor: selectedRef.current });
           if (payload.ok !== true) return;
-          setRunning(Array.isArray(payload.running) ? payload.running : []);
-          setBuilds(Array.isArray(payload.builds) ? payload.builds : []);
+          const running = Array.isArray(payload.running) ? payload.running : [];
+          const builds = Array.isArray(payload.builds) ? payload.builds : [];
+          setRunning((current) => keepTail(running, current));
+          setBuilds((current) => keepTail(builds, current));
           setPorts(payload.ports !== null && payload.ports !== undefined && typeof payload.ports === 'object' ? payload.ports : {});
           if (typeof payload.root === 'string' && payload.root !== '') setRoot(payload.root);
-        }, []);
+        }, [keepTail]);
 
+        // 有部署 / 发布正在传文件时轮询密一点：进度条和速度 2.5 秒一跳太钝
+        const transferring = builds.some((entry) => entry.progress !== undefined && entry.state === 'running');
         React.useEffect(() => {
           refreshList();
           refreshStatus();
           let stopped = false;
           const timer = window.setInterval(() => {
             if (!stopped) refreshStatus();
-          }, 2500);
+          }, transferring ? 900 : 2500);
           return () => {
             stopped = true;
             window.clearInterval(timer);
           };
-        }, [refreshList, refreshStatus]);
+        }, [refreshList, refreshStatus, transferring]);
+
+        /** 有任务在等自动收起时每秒滴一下：轮询 2.5s 一轮，倒数要更细一点。 */
+        const [countdownTick, setCountdownTick] = React.useState(0);
+        React.useEffect(() => {
+          if (!builds.some((entry) => Number.isInteger(entry.clearAt))) return undefined;
+          const timer = window.setInterval(() => setCountdownTick((current) => current + 1), 1000);
+          return () => window.clearInterval(timer);
+        }, [builds]);
+
+        /** 自动清除倒计时：Host 把「什么时候收起」写在 clearAt 里，这里换算成秒。 */
+        const clearInLabel = (entry) => {
+          if (!Number.isInteger(entry.clearAt)) return '';
+          void countdownTick; // 每秒滴一次，让下面的 Date.now() 跟着重新渲染
+          const seconds = Math.max(0, Math.round((entry.clearAt - Date.now()) / 1000));
+          return seconds === 0 ? t('clearAnyNow') : t('clearIn').replace('{seconds}', String(seconds));
+        };
+
+        /** 上传进度：Host 只给字节数和速度，写法在这里换算（和 Host 侧 lib/progress.js 保持一致）。 */
+        const sizeLabel = (bytes) => {
+          const value = Number(bytes);
+          if (!Number.isFinite(value) || value <= 0) return '0 B';
+          if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
+          if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB`;
+          if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+          return `${Math.round(value)} B`;
+        };
+        const speedLabel = (bytesPerSecond) => {
+          const value = Number(bytesPerSecond);
+          if (!Number.isFinite(value) || value <= 0) return '—';
+          if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB/s`;
+          if (value >= 1024) return `${Math.round(value / 1024)} KB/s`;
+          return `${Math.round(value)} B/s`;
+        };
+        const progressOf = (entry) => (
+          entry.progress !== undefined && typeof entry.progress.percent === 'number' ? entry.progress : undefined
+        );
 
         const act = React.useCallback(async (key, path, body) => {
           setBusy((current) => ({ ...current, [key]: true }));
@@ -602,6 +728,20 @@ window.__ModuleLoader__.load({
           }
         };
 
+        /** 保存「任务完成自动清除」偏好；Host 端顺手把已经跑完的同类任务清掉。 */
+        const saveAutoClear = async (next) => {
+          const value = normalizeAutoClear(next);
+          setAutoClear(value);
+          const payload = await post('/prefs', { autoClear: value });
+          if (payload.ok !== true) {
+            setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+            return;
+          }
+          setAutoClear(normalizeAutoClear(payload.autoClear));
+          // Host 刚清过一轮，立刻刷一次，不用等 2.5s 的常规轮询
+          await refreshStatus();
+        };
+
         /** 批量启动 / 停止选中项，汇总失败信息。 */
         const runBatch = async (path, ids) => {
           if (ids.length === 0) {
@@ -637,21 +777,40 @@ window.__ModuleLoader__.load({
         const taskLive = (entry) => entry !== undefined
           && (entry.state === 'running' || entry.state === 'building' || entry.state === 'stopping');
 
-        /**
-         * 清除任务（单个「清除」和「一键清除」共用）。
-         * 运行中的任务先弹确认；Host 端还会再确认一次（needsConfirm），防止面板状态过期。
-         */
-        const clearTasks = async (ids, key) => {
-          if (ids.length === 0) return;
-          const live = ids.some((id) => taskLive(buildMap.get(id)) || taskLive(runningMap.get(id)));
-          if (live && window.confirm(t('clearRunningConfirm')) !== true) return;
+        /** 就地确认状态：{ ids, key, force }；3 秒不点自动收回。 */
+        const [pendingClear, setPendingClear] = React.useState(undefined);
+        const pendingClearTimer = React.useRef(undefined);
+
+        const clearPendingTimer = () => {
+          if (pendingClearTimer.current !== undefined) {
+            window.clearTimeout(pendingClearTimer.current);
+            pendingClearTimer.current = undefined;
+          }
+        };
+
+        const armClear = (ids, key, force) => {
+          clearPendingTimer();
+          setPendingClear({ ids, key, force: force === true });
+          pendingClearTimer.current = window.setTimeout(() => { setPendingClear(undefined); }, 3000);
+        };
+
+        const cancelClear = () => {
+          clearPendingTimer();
+          setPendingClear(undefined);
+        };
+
+        React.useEffect(() => clearPendingTimer, []);
+
+        /** 真正发清除请求。 */
+        const runClear = async (ids, key, force) => {
           setBusy((current) => ({ ...current, clearing: true, [key]: true }));
           setError('');
           try {
-            let payload = await post('/clear-tasks', { ids, force: live });
+            const payload = await post('/clear-tasks', { ids, force: force === true });
             if (payload.ok !== true && payload.needsConfirm === true) {
-              if (window.confirm(t('clearRunningConfirm')) !== true) return;
-              payload = await post('/clear-tasks', { ids, force: true });
+              // Host 说这任务其实还在跑：把确认重新摆回按钮上，等用户点「是」
+              armClear(ids, key, true);
+              return;
             }
             if (payload.ok !== true) {
               setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
@@ -672,6 +831,45 @@ window.__ModuleLoader__.load({
             window.setTimeout(() => { void refreshStatus(); }, 600);
             window.setTimeout(() => { void refreshStatus(); }, 1600);
           }
+        };
+
+        /**
+         * 清除任务（单个「清除」和「一键清除」共用）。
+         * 运行中的任务就地确认（不弹系统对话框）；Host 端还会再确认一次（needsConfirm），防止面板状态过期。
+         */
+        const clearTasks = (ids, key) => {
+          if (ids.length === 0) return;
+          const live = ids.some((id) => taskLive(buildMap.get(id)) || taskLive(runningMap.get(id)));
+          if (live) {
+            armClear(ids, key, false);
+            return;
+          }
+          void runClear(ids, key, false);
+        };
+
+        /** 「清除」按钮：点下去就地变成是/否；只有确认状态对同一个 key 才替换。 */
+        const clearButton = (ids, key, label) => {
+          if (pendingClear !== undefined && pendingClear.key === key) {
+            return h('span', { style: styles.inlineConfirm },
+              h('span', { style: styles.confirmText }, t('clearConfirmInline')),
+              h('button', {
+                type: 'button',
+                style: styles.buttonDanger,
+                onClick: () => {
+                  const live = pendingClear.force === true
+                    || ids.some((id) => taskLive(buildMap.get(id)) || taskLive(runningMap.get(id)));
+                  cancelClear();
+                  void runClear(ids, key, live);
+                },
+              }, t('confirmYes')),
+              h('button', { type: 'button', style: styles.button, onClick: cancelClear }, t('confirmNo')));
+          }
+          return h('button', {
+            type: 'button',
+            style: styles.button,
+            disabled: busy.clearing === true,
+            onClick: () => { clearTasks(ids, key); },
+          }, busy[key] === true ? h(Spinner) : null, label);
         };
 
         const visibleProjects = projects.filter((project) => showHidden || !hiddenSet.has(project.id));
@@ -698,9 +896,11 @@ window.__ModuleLoader__.load({
                 host: typeof config.host === 'string' ? config.host : '',
                 port: Number.isInteger(config.port) ? String(config.port) : '',
                 user: typeof config.user === 'string' ? config.user : '',
-                password: typeof config.password === 'string' ? config.password : '',
+                // Host 不再回传明文密码：输入框留空，占位符说明「不改就保持原值」
+                password: '',
                 alias: typeof config.alias === 'string' ? config.alias : '',
               });
+              setDeployHasPassword(config.hasPassword === true);
               const targets = {};
               const containers = {};
               for (const [id, target] of Object.entries(config.targets ?? {})) {
@@ -720,8 +920,8 @@ window.__ModuleLoader__.load({
           }
         };
 
-        /** 保存部署配置：服务器地址 + 每个项目的远端目录。 */
-        const saveDeployConfig = async () => {
+        /** 保存部署配置：服务器地址 + 每个项目的远端目录。密码留空 = 保持 Host 上已存的值。 */
+        const saveDeployConfig = async (options = {}) => {
           const config = {
             ...deployForm.host.trim() === '' ? {} : { host: deployForm.host.trim() },
             ...deployForm.port.trim() === '' || !Number.isInteger(Number(deployForm.port)) ? {} : { port: Number(deployForm.port) },
@@ -742,11 +942,18 @@ window.__ModuleLoader__.load({
             const response = await fetch('/dsh-devship/deploy-config', {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ root: resolveRoot(), config }),
+              body: JSON.stringify({
+                root: resolveRoot(),
+                config,
+                ...options.clearPassword === true ? { clearPassword: true } : {},
+              }),
             });
             const payload = await response.json();
             if (payload.ok === true) {
               setDeployNote(t('deploySaved'));
+              // 明文密码不在输入框里过夜：保存完就擦掉，只留「有没有存」这个状态
+              setDeployForm((current) => ({ ...current, password: '' }));
+              setDeployHasPassword(payload.config?.hasPassword === true);
               await refreshList();
             } else {
               setDeployNote(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
@@ -778,7 +985,10 @@ window.__ModuleLoader__.load({
 
         const openLog = (id) => {
           setSelected(id);
+          selectedRef.current = id;
           setShowLog(true);
+          // 选谁就得马上看到谁的日志：别等下一轮 2.5s 轮询
+          void refreshStatus();
         };
 
         /** 复制完整日志（来自落盘文件，不受面板尾部长度限制）。 */
@@ -906,12 +1116,7 @@ window.__ModuleLoader__.load({
                 onClick: () => openLog(project.id),
               }, t('logs')),
               run !== undefined && run.state !== 'running' && run.state !== 'building' && run.state !== 'stopping'
-                ? h('button', {
-                  type: 'button',
-                  style: styles.button,
-                  disabled: busy.clearing === true,
-                  onClick: () => { void clearTasks([project.id], project.id + ':forget'); },
-                }, busy[project.id + ':forget'] === true ? h(Spinner) : null, t('clear'))
+                ? clearButton([project.id], project.id + ':forget', t('clear'))
                 : null,
               h('button', {
                 type: 'button',
@@ -1036,6 +1241,47 @@ window.__ModuleLoader__.load({
                 onClick: () => setShowHidden((value) => !value),
               }, showHidden ? t('hideHidden') : `${t('showHidden')} (${hidden.length})`),
           ),
+          h('div', { style: styles.actions, title: t('autoClearHint') },
+            h('span', { style: { ...styles.tiny, fontWeight: 600 } }, t('autoClearTitle')),
+            h('label', { style: { ...styles.tiny, display: 'flex', alignItems: 'center', gap: 3 } },
+              h('input', {
+                type: 'checkbox',
+                checked: autoClear.build,
+                onChange: (event) => { void saveAutoClear({ ...autoClear, build: event.target.checked }); },
+              }),
+              t('build'),
+            ),
+            h('label', { style: { ...styles.tiny, display: 'flex', alignItems: 'center', gap: 3 } },
+              h('input', {
+                type: 'checkbox',
+                checked: autoClear.deploy,
+                onChange: (event) => { void saveAutoClear({ ...autoClear, deploy: event.target.checked }); },
+              }),
+              t('deploy'),
+            ),
+            h('label', { style: { ...styles.tiny, display: 'flex', alignItems: 'center', gap: 3 } },
+              h('input', {
+                type: 'checkbox',
+                checked: autoClear.release,
+                onChange: (event) => { void saveAutoClear({ ...autoClear, release: event.target.checked }); },
+              }),
+              t('release'),
+            ),
+            h('select', {
+              style: styles.select,
+              value: String(autoClear.delayMs),
+              title: t('autoClearDelay'),
+              onChange: (event) => { void saveAutoClear({ ...autoClear, delayMs: Number(event.target.value) }); },
+            },
+              ...AUTO_CLEAR_DELAYS.map((ms) => h('option', {
+                key: ms,
+                value: String(ms),
+              }, ms === 0 ? t('autoClearNow') : `${ms / 1000} ${t('autoClearSecondsUnit')}`)),
+            ),
+          ),
+          autoClear.build === true || autoClear.deploy === true || autoClear.release === true
+            ? h('div', { style: styles.tiny }, t('autoClearHint'))
+            : null,
           deployOpen
             ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, padding: '2px 0' } },
               h('div', { style: { fontWeight: 600, fontSize: 12 } }, t('deployServer')),
@@ -1065,11 +1311,19 @@ window.__ModuleLoader__.load({
                 }),
                 h('input', {
                   value: deployForm.password,
-                  placeholder: t('deployPassword'),
+                  placeholder: deployHasPassword ? t('deployPasswordSaved') : t('deployPassword'),
+                  ...(deployHasPassword ? { title: t('deployPasswordSaved') } : {}),
                   type: 'password',
+                  autoComplete: 'new-password',
                   onChange: (event) => setDeployForm((current) => ({ ...current, password: event.target.value })),
                   style: { ...styles.input, flex: '1 1 110px', minWidth: 90 },
                 }),
+                deployHasPassword && deployForm.password === ''
+                  ? h('button', {
+                      title: t('deployPasswordClearHint'),
+                      onClick: () => { void saveDeployConfig({ clearPassword: true }); },
+                    }, t('deployPasswordClear'))
+                  : null,
               ),
               h('input', {
                 value: deployForm.alias,
@@ -1123,33 +1377,40 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.actions },
                 h('span', { style: { fontWeight: 600, fontSize: 12 } }, `${t('tasks')} (${builds.length})`),
                 h('span', { style: styles.spacer }),
-                h('button', {
-                  type: 'button',
-                  style: styles.button,
-                  disabled: busy.clearing === true,
-                  onClick: () => { void clearTasks(builds.map((entry) => entry.id), 'clear:all'); },
-                }, busy['clear:all'] === true ? h(Spinner) : null, t('clearAll')),
+                clearButton(builds.map((entry) => entry.id), 'clear:all', t('clearAll')),
               ),
-              builds.map((entry) => h(
-                'div',
-                { key: entry.id, style: styles.card },
-                h('div', { style: styles.cardHead },
-                  h('span', { style: { ...styles.dot, background: STATE_COLOR[entry.state] ?? '#98a2b3' } }),
-                  h('span', { style: styles.name }, entry.name),
-                  h('span', { style: styles.badge }, entry.tool === 'pnpm' ? 'pnpm' : entry.tool === 'ssh' ? 'SSH' : 'Maven'),
-                  h('span', { style: styles.spacer }),
-                  h('span', { style: { ...styles.tiny, color: STATE_COLOR[entry.state] ?? '#98a2b3' } }, stateLabel(entry)),
-                ),
-                h('div', { style: styles.actions },
-                  h('button', { type: 'button', style: styles.button, onClick: () => openLog(entry.id) }, t('logs')),
-                  h('button', {
-                    type: 'button',
-                    style: styles.button,
-                    disabled: busy.clearing === true,
-                    onClick: () => { void clearTasks([entry.id], entry.id + ':forget'); },
-                  }, busy[entry.id + ':forget'] === true ? h(Spinner) : null, t('clear')),
-                ),
-              )),
+              builds.map((entry) => {
+                const progress = progressOf(entry);
+                const percent = progress === undefined ? 0 : Math.max(0, Math.min(100, progress.percent));
+                return h(
+                  'div',
+                  { key: entry.id, style: styles.card },
+                  h('div', { style: styles.cardHead },
+                    h('span', { style: { ...styles.dot, background: STATE_COLOR[entry.state] ?? '#98a2b3' } }),
+                    h('span', { style: styles.name }, entry.name),
+                    h('span', { style: styles.badge }, entry.tool === 'pnpm' ? 'pnpm' : entry.tool === 'ssh' ? 'SSH' : 'Maven'),
+                    h('span', { style: styles.spacer }),
+                    h('span', { style: { ...styles.tiny, color: STATE_COLOR[entry.state] ?? '#98a2b3' } }, stateLabel(entry)),
+                    clearInLabel(entry) === ''
+                      ? null
+                      : h('span', { style: styles.tiny }, clearInLabel(entry)),
+                  ),
+                  progress === undefined
+                    ? null
+                    : h('div', { style: styles.progressRow, title: t('progressHint') },
+                      h('span', { style: styles.tiny }, `${percent}%`),
+                      h('div', { style: styles.progressTrack },
+                        h('div', { style: { ...styles.progressFill, width: `${percent}%` } }),
+                      ),
+                      h('span', { style: styles.tiny }, `${sizeLabel(progress.uploaded)} / ${sizeLabel(progress.total)}`),
+                      h('span', { style: styles.tiny }, speedLabel(progress.bytesPerSecond)),
+                    ),
+                  h('div', { style: styles.actions },
+                    h('button', { type: 'button', style: styles.button, onClick: () => openLog(entry.id) }, t('logs')),
+                    clearButton([entry.id], entry.id + ':forget', t('clear')),
+                  ),
+                );
+              }),
             ),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 } },
             h('span', { style: { fontWeight: 600, fontSize: 12 } }, selectedEntry === undefined ? t('logTitle') : t('logTitle') + ' · ' + selectedEntry.name),
