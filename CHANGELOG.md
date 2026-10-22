@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.2
+
+- **Fix**: 走 HTTPS 从局域网访问时页面反复「重新连接中 → 连接成功」——面板轮询以前是「到点就发」，上一条 `/status` 还没回来下一条就发出去了，Host 一慢就堆成 3 条 4 条请求。浏览器对同一个源最多开 6 条 HTTP/1.1 连接，面板把连接占满之后，DSH 自己的接口（`/api/...`，同源）只能排队，连接生成超过 15 秒就被客户端判超时、取消这一代连接重连。现在一轮只允许一条请求在路上（上一跳没回来就跳过），每条带 9 秒超时，连着失败按 2.5 → 5 → 10 → 15 秒退避，浏览器标签页在后台时不轮询、回到前台立刻补一次
+- **Perf**: `/status` 的 pid 判活从「每个脱离进程单独 spawn 一次 `tasklist`」改成「一轮只 spawn 一次、一次问全部」，并且和端口探测同时进行（以前是探测完再一条条串行判活）。7 个服务以前每轮 7 次 CreateProcess，宿主事件循环被堵住，插件面板和 DSH 自己的接口一起变慢
+- **Internal**: `post()` 失败不再往外抛（以前定时器里的 `refreshStatus()` 抛出去就是一条 unhandled rejection），统一收成 `{ok:false,error}`；`/list`、`/status` 的超时和断线在界面上显示本地文案，不再把 `network` / `timeout` 这种英文代码丢给用户
+- **Internal**: 有文件正在上传时轮询从 0.9 秒调到 1.2 秒（有了「一轮一条」之后进度照样跟得上，占的连接更少）
+- **Tests**: 新增 [test/pid-alive.test.mjs](test/pid-alive.test.mjs)（`tasklist /FO CSV` 解析、批量口径与单条入口一致、非法 pid 不占用查询）；全套 77 项
+
 ## 2.1.1
 
 - **Fix**: 启动服务不再弹 cmd.exe 黑窗口。脱离模式（默认）以前是 WMI 直接起 `cmd.exe /d /c run-*.cmd`，服务跑着的时候桌面上就一直挂着一个 cmd 窗口（实测那个进程 `MainWindowHandle` 非 0、标题正是 `C:\WINDOWS\system32\cmd.exe`）。现在改成 WMI 起没有控制台的 `wscript.exe`，它用 `WScript.Shell.Run(..., 0, False)`（窗口样式 0 = 隐藏）起 powershell，powershell 再跑原来那个 `.cmd`——实测真正在跑的 powershell `MainWindowHandle=0`、标题为空，全程没有窗口

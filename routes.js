@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { portBusy } from './lib/net.js';
 import { createWarn } from './lib/log.js';
 import { AUTO_CLEAR_DELAYS, normalizeAutoClear, readDeployConfig, readPrefs, readSshHosts, writeDeployConfig, writePrefs } from './lib/prefs.js';
-import { logFileFor, pidAliveAsync, publicEntry, tailOf } from './lib/state.js';
+import { logFileFor, pidsAliveAsync, publicEntry, tailOf } from './lib/state.js';
 import { readTail } from './lib/util.js';
 
 const PREFIX = '/dsh-devship';
@@ -82,6 +82,13 @@ export function createRoutes(ctx, core) {
     // 端口探测：让面板也能标出「已被外部实例占用」的服务（IDEA/终端起的那些）
     const ports = {};
     let scannedProjects = [];
+    // 脱离模式的进程没有 handle.done，靠 pid 判活：一轮只问一次 tasklist，
+    // 而且和端口探测同时进行，别把这条请求串成「探测 + 判活」两截。
+    const detachedPids = [];
+    for (const entry of processes.values()) {
+      if (entry.detached === true && entry.state === 'running' && Number.isInteger(entry.pid)) detachedPids.push(entry.pid);
+    }
+    const alivePromise = detachedPids.length > 0 ? pidsAliveAsync(detachedPids) : undefined;
     try {
       // 只用已有缓存：/status 每 2.5s 调一次，绝不能再触发一次扫描（sandbox 下要好几秒）
       const cached = scanCache.get(root);
@@ -106,14 +113,15 @@ export function createRoutes(ctx, core) {
     } catch (error) {
       warn(`接管已有进程失败 (${root})`, error);
     }
-    // 脱离模式的进程没有 handle.done，靠 pid 判活
-    for (const [id, entry] of processes.entries()) {
-      if (entry.detached !== true || entry.state !== 'running') continue;
-      const alive = Number.isInteger(entry.pid) ? await pidAliveAsync(entry.pid) : undefined;
-      if (alive !== false) continue; // 活着或状态未知都先保留
-      entry.state = 'exited';
-      tailOf(entry);
-      void forgetRun(root, id);
+    if (alivePromise !== undefined) {
+      const alive = await alivePromise;
+      for (const [id, entry] of processes.entries()) {
+        if (entry.detached !== true || entry.state !== 'running' || !Number.isInteger(entry.pid)) continue;
+        if (alive.get(entry.pid) !== false) continue; // 活着或状态未知都先保留
+        entry.state = 'exited';
+        tailOf(entry);
+        void forgetRun(root, id);
+      }
     }
     // 轮询响应不能带全量日志：7 个服务 × 100k 字符 ≈ 600KB/2.5s
     const STATUS_TAIL_MAX = 8000;

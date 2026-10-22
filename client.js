@@ -116,6 +116,7 @@ window.__ModuleLoader__.load({
         working: '处理中…',
         errorTitle: '操作失败',
         staleHost: '后台插件仍在运行旧代码：请在插件管理里停用再启用 dsh-devship（或重启 DSH 后台服务）后重试。',
+        netError: '连不上后台：请求超时或连接中断，稍后会自动重试。',
       },
       en: {
         panel: 'DSH DevShip',
@@ -211,20 +212,42 @@ window.__ModuleLoader__.load({
         working: 'Working…',
         errorTitle: 'Operation failed',
         staleHost: 'The host half is still running older code. Disable and re-enable dsh-devship in Plugins (or restart the DSH backend), then retry.',
+        netError: 'Cannot reach the backend: the request timed out or the connection dropped. Retrying automatically.',
       },
     };
 
     /** 当前工作区路径（由 apply 注入：sessions + workspaces 快照）。 */
     let resolveRoot = () => undefined;
 
-    async function post(path, body) {
+    /**
+     * 面板自己的请求：带超时、可取消，失败一律收成 {ok:false,error}（不往外抛）。
+     * 走局域网 HTTPS 时慢请求很容易堆起来——浏览器对同一个源最多开 6 条 HTTP/1.1 连接，
+     * 面板把连接占满，DSH 自己的接口就得排队，连接生成超时就变成「重新连接中」。
+     */
+    async function post(path, body, options) {
       const root = resolveRoot();
       const payloadBody = { ...(body ?? {}), ...(typeof root === 'string' && root !== '' ? { root } : {}) };
-      const response = await fetch('/dsh-devship' + path, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payloadBody),
-      });
+      const controller = new AbortController();
+      const external = options?.signal;
+      if (external !== undefined && external !== null) {
+        if (external.aborted === true) controller.abort();
+        else external.addEventListener('abort', () => controller.abort(), { once: true });
+      }
+      const timeoutMs = typeof options?.timeoutMs === 'number' ? options.timeoutMs : 10000;
+      const timer = timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : undefined;
+      let response;
+      try {
+        response = await fetch('/dsh-devship' + path, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payloadBody),
+          signal: controller.signal,
+        });
+      } catch {
+        if (timer !== undefined) window.clearTimeout(timer);
+        return { ok: false, error: controller.signal.aborted === true ? 'timeout' : 'network' };
+      }
+      if (timer !== undefined) window.clearTimeout(timer);
       let payload;
       try {
         payload = await response.json();
@@ -441,6 +464,12 @@ window.__ModuleLoader__.load({
       const t = ctx.locale.bind(NS);
       ctx.effect(() => ctx.locale.register(NS, DICT), 'dsh-devship: dictionaries');
 
+      /** 传输层失败（超时 / 断线 / 请求作废）别把英文代码丢给用户看，换成本地文案。 */
+      const errorText = (value, fallback) => {
+        if (value === 'network' || value === 'timeout' || value === 'aborted') return t('netError');
+        return typeof value === 'string' ? value : fallback;
+      };
+
       /** 主视图会话的 id。 */
       function currentSessionId() {
         try {
@@ -606,7 +635,7 @@ window.__ModuleLoader__.load({
                 setError('');
               }
             } else {
-              setError(typeof payload.error === 'string' ? payload.error : 'list failed');
+              setError(errorText(payload.error, 'list failed'));
             }
           } finally {
             setBusyRefresh(false);
@@ -620,9 +649,34 @@ window.__ModuleLoader__.load({
           return old === undefined || typeof old.tail !== 'string' ? entry : { ...entry, tail: old.tail };
         }), []);
 
-        const refreshStatus = React.useCallback(async () => {
-          const payload = await post('/status', { logFor: selectedRef.current });
-          if (payload.ok !== true) return;
+        /**
+         * 一轮 /status 只允许一个在路上：上一轮还没回来就跳过这一跳（定时轮询最容易在这里
+         * 把请求堆成 3 条 4 条）；用户动作后的刷新用 force 顶掉旧请求，保证看到新状态。
+         */
+        const statusFlight = React.useRef({ seq: 0, running: false, controller: undefined, fails: 0 });
+
+        const refreshStatus = React.useCallback(async (options) => {
+          const flight = statusFlight.current;
+          const force = options?.force === true;
+          if (flight.running === true && force !== true) return;
+          if (flight.running === true) flight.controller?.abort();
+          const controller = new AbortController();
+          const token = flight.seq + 1;
+          flight.seq = token;
+          flight.running = true;
+          flight.controller = controller;
+          const payload = await post('/status', { logFor: selectedRef.current }, { signal: controller.signal, timeoutMs: 9000 });
+          if (flight.seq === token) {
+            flight.running = false;
+            flight.controller = undefined;
+          }
+          if (controller.signal.aborted === true) return;
+          if (payload.ok !== true) {
+            // 超时 / 断线：连着失败就退避，别在 Host 正忙或正在重连的时候继续催
+            flight.fails += 1;
+            return;
+          }
+          flight.fails = 0;
           const running = Array.isArray(payload.running) ? payload.running : [];
           const builds = Array.isArray(payload.builds) ? payload.builds : [];
           setRunning((current) => keepTail(running, current));
@@ -634,15 +688,41 @@ window.__ModuleLoader__.load({
         // 有部署 / 发布正在传文件时轮询密一点：进度条和速度 2.5 秒一跳太钝
         const transferring = builds.some((entry) => entry.progress !== undefined && entry.state === 'running');
         React.useEffect(() => {
-          refreshList();
-          refreshStatus();
           let stopped = false;
-          const timer = window.setInterval(() => {
-            if (!stopped) refreshStatus();
-          }, transferring ? 900 : 2500);
+          let timer = undefined;
+          const base = transferring ? 1200 : 2500;
+          const delay = () => {
+            const fails = statusFlight.current.fails;
+            if (fails === 0) return base;
+            return Math.min(base * 2 ** Math.min(fails, 3), 15000);
+          };
+          const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
+          const schedule = (ms) => {
+            if (stopped) return;
+            if (timer !== undefined) window.clearTimeout(timer);
+            timer = window.setTimeout(() => {
+              timer = undefined;
+              if (stopped) return;
+              // 后台标签页（局域网把面板开着当后台页）不占连接：每 5 秒看一眼有没有回到前台
+              if (visible() !== true) { schedule(5000); return; }
+              void refreshStatus()
+                .catch(() => { statusFlight.current.fails += 1; })
+                .then(() => schedule(delay()));
+            }, ms);
+          };
+          refreshList();
+          void refreshStatus({ force: true });
+          schedule(base);
+          const onVisibility = () => { if (visible() === true) schedule(0); };
+          if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
           return () => {
             stopped = true;
-            window.clearInterval(timer);
+            if (timer !== undefined) window.clearTimeout(timer);
+            if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
+            // 面板切走 / 重新挂载：在路上的那条请求直接作废，别留一条没人收的连接
+            statusFlight.current.controller?.abort();
+            statusFlight.current.running = false;
+            statusFlight.current.controller = undefined;
           };
         }, [refreshList, refreshStatus, transferring]);
 
@@ -687,7 +767,7 @@ window.__ModuleLoader__.load({
           setError('');
           try {
             const payload = await post(path, body);
-            if (payload.ok !== true) setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+            if (payload.ok !== true) setError(errorText(payload.error, t('errorTitle')));
             return payload;
           } catch (failure) {
             setError(failure instanceof Error ? failure.message : String(failure));
@@ -700,9 +780,9 @@ window.__ModuleLoader__.load({
             });
             // 先同步一次（多数动作 Host 侧已有结果），再用短间隔补两次，
             // 让「点完立刻出现」而不是等 2.5s 的常规轮询
-            await refreshStatus();
-            window.setTimeout(() => { void refreshStatus(); }, 600);
-            window.setTimeout(() => { void refreshStatus(); }, 1600);
+            await refreshStatus({ force: true });
+            window.setTimeout(() => { void refreshStatus({ force: true }); }, 600);
+            window.setTimeout(() => { void refreshStatus({ force: true }); }, 1600);
           }
         }, [refreshStatus, t]);
 
@@ -724,7 +804,7 @@ window.__ModuleLoader__.load({
             setHidden(Array.isArray(payload.hidden) ? payload.hidden : []);
             if (hide === true) toggleChecked(id, false);
           } else {
-            setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+            setError(errorText(payload.error, t('errorTitle')));
           }
         };
 
@@ -734,12 +814,12 @@ window.__ModuleLoader__.load({
           setAutoClear(value);
           const payload = await post('/prefs', { autoClear: value });
           if (payload.ok !== true) {
-            setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+            setError(errorText(payload.error, t('errorTitle')));
             return;
           }
           setAutoClear(normalizeAutoClear(payload.autoClear));
           // Host 刚清过一轮，立刻刷一次，不用等 2.5s 的常规轮询
-          await refreshStatus();
+          await refreshStatus({ force: true });
         };
 
         /** 批量启动 / 停止选中项，汇总失败信息。 */
@@ -753,7 +833,7 @@ window.__ModuleLoader__.load({
           try {
             const payload = await post(path, { projectIds: ids, profile, clean, fast: fastBuild, detach: detachRun });
             if (payload.ok !== true) {
-              setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+              setError(errorText(payload.error, t('errorTitle')));
               return;
             }
             const results = Array.isArray(payload.results) ? payload.results : [];
@@ -769,7 +849,7 @@ window.__ModuleLoader__.load({
               delete next.batch;
               return next;
             });
-            await refreshStatus();
+            await refreshStatus({ force: true });
           }
         };
 
@@ -813,7 +893,7 @@ window.__ModuleLoader__.load({
               return;
             }
             if (payload.ok !== true) {
-              setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+              setError(errorText(payload.error, t('errorTitle')));
               return;
             }
             setSelected((current) => (current !== '' && ids.includes(current) ? '' : current));
@@ -827,9 +907,9 @@ window.__ModuleLoader__.load({
               return next;
             });
             // 与 act 一致：先同步一次，再补两次，清除后列表立刻收起来
-            await refreshStatus();
-            window.setTimeout(() => { void refreshStatus(); }, 600);
-            window.setTimeout(() => { void refreshStatus(); }, 1600);
+            await refreshStatus({ force: true });
+            window.setTimeout(() => { void refreshStatus({ force: true }); }, 600);
+            window.setTimeout(() => { void refreshStatus({ force: true }); }, 1600);
           }
         };
 
@@ -913,7 +993,7 @@ window.__ModuleLoader__.load({
               setDeployHosts(Array.isArray(payload.hosts) ? payload.hosts : []);
               setDeployOpen(true);
             } else {
-              setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+              setError(errorText(payload.error, t('errorTitle')));
             }
           } catch (failure) {
             setError(failure instanceof Error ? failure.message : String(failure));
@@ -956,7 +1036,7 @@ window.__ModuleLoader__.load({
               setDeployHasPassword(payload.config?.hasPassword === true);
               await refreshList();
             } else {
-              setDeployNote(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+              setDeployNote(errorText(payload.error, t('errorTitle')));
             }
           } catch (failure) {
             setDeployNote(failure instanceof Error ? failure.message : String(failure));
@@ -988,7 +1068,7 @@ window.__ModuleLoader__.load({
           selectedRef.current = id;
           setShowLog(true);
           // 选谁就得马上看到谁的日志：别等下一轮 2.5s 轮询
-          void refreshStatus();
+          void refreshStatus({ force: true });
         };
 
         /** 复制完整日志（来自落盘文件，不受面板尾部长度限制）。 */
@@ -1001,7 +1081,7 @@ window.__ModuleLoader__.load({
             });
             const payload = await response.json();
             if (payload.ok !== true) {
-              setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+              setError(errorText(payload.error, t('errorTitle')));
               return;
             }
             const text = typeof payload.text === 'string' ? payload.text : '';
@@ -1031,7 +1111,7 @@ window.__ModuleLoader__.load({
             });
             const payload = await response.json();
             if (payload.ok !== true) {
-              setError(typeof payload.error === 'string' ? payload.error : t('errorTitle'));
+              setError(errorText(payload.error, t('errorTitle')));
               return;
             }
             setLogNote(typeof payload.path === 'string' ? payload.path : '');
@@ -1156,7 +1236,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               style: styles.button,
               disabled: busyRefresh,
-              onClick: () => { void refreshList(true); void refreshStatus(); },
+              onClick: () => { void refreshList(true); void refreshStatus({ force: true }); },
             }, busyRefresh ? h(Spinner) : null, busyRefresh ? t('refreshing') : t('refresh')),
           ),
           h('div', { style: { ...styles.tiny, ...styles.mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: root }, root),
