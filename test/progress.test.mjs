@@ -132,6 +132,25 @@ test('速度按最近这段时间算，不会被整轮平均拖低', () => {
   assert.ok(speed > overallAverage, `整轮平均只有 ${overallAverage} B/s，速度不该被它拖低`);
 });
 
+test('采样节流：密集回调不会把速度窗口压成几百毫秒', () => {
+  const time = clock();
+  const chunk = 32768;
+  const progress = createUploadProgress(chunk * 1000, { now: time.now, tickMs: 500 });
+  progress.beginFile(0, chunk * 1000);
+
+  // 照 ssh2 的节奏来：每传完一块（32 KB）回调一次，每块 10 ms → 真实速度 3.2768 MB/s
+  for (let index = 1; index <= 1000; index += 1) {
+    progress.stepFile(0, index * chunk);
+    time.advance(10);
+  }
+
+  const speed = progress.snapshot().bytesPerSecond;
+  assert.ok(
+    speed > 3_100_000 && speed < 3_400_000,
+    `速度该在 3.27 MB/s 附近，实际 ${(speed / 1024 / 1024).toFixed(2)} MB/s（采样太密就会算飞）`,
+  );
+});
+
 test('formatBytes / formatSpeed 的写法', () => {
   assert.equal(formatBytes(0), '0 B');
   assert.equal(formatBytes(1023), '1023 B');
