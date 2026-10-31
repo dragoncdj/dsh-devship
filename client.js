@@ -91,8 +91,10 @@ window.__ModuleLoader__.load({
         deployRemoteDir: '远端目录（留空 = 不部署）',
         deployContainer: '容器名',
         deployTarget: '远端目录',
-        deployEnv: '发布环境',
-        deployEnvHint: '「部署 / 发布」发往哪台服务器',
+        deployEnv: '默认发布环境',
+        deployEnvHint: '卡片上的目录就是这台（默认目标）的；点「部署 / 发布」可以另选环境',
+        deployPickEnv: '发到哪台？',
+        deployPickShiftHint: '按住 Shift 点 = 直接发默认那台',
         deployEnvNone: '还没配服务器：点「部署配置」',
         deployEnvDefaultBadge: '默认',
         deployEnvProtected: '受保护',
@@ -206,8 +208,10 @@ window.__ModuleLoader__.load({
         deployRemoteDir: 'remote dir (empty = skip)',
         deployContainer: 'container',
         deployTarget: 'remote dir',
-        deployEnv: 'Deploy target',
-        deployEnvHint: 'which server Deploy and Release go to',
+        deployEnv: 'Default deploy target',
+        deployEnvHint: 'card dirs come from this one (the default); click Deploy / Release to pick another',
+        deployPickEnv: 'Deploy to which one?',
+        deployPickShiftHint: 'Shift-click = send straight to the default',
         deployEnvNone: 'No server configured: open Deploy config',
         deployEnvDefaultBadge: 'default',
         deployEnvProtected: 'protected',
@@ -636,15 +640,18 @@ window.__ModuleLoader__.load({
         const envProtected = currentServer?.protected === true;
         /** 受保护环境已经点过一次了：按钮变成「确认发到 X」，再点才真发。 */
         const armedEnv = envProtected === true && confirmEnv === envId;
-        const taskKey = (kind, projectId) => envId === '' || envId === LEGACY_ENV
+        const keyFor = (kind, projectId, serverId) => serverId === '' || serverId === LEGACY_ENV
           ? `${kind}:${projectId}`
-          : `${kind}_${envId}_${projectId}`;
-        /** 每次要发都带上环境；受保护环境第二次点才带 confirm。 */
-        const envBody = (extra) => ({
-          ...(envId === '' ? {} : { serverId: envId }),
-          ...(envProtected === true ? { confirm: true } : {}),
+          : `${kind}_${serverId}_${projectId}`;
+        const taskKey = (kind, projectId) => keyFor(kind, projectId, envId);
+        /** 请求体：带上发哪台；受保护环境要带 confirm。 */
+        const envBodyFor = (serverId, isProtected, extra) => ({
+          ...(serverId === '' ? {} : { serverId }),
+          ...(isProtected === true ? { confirm: true } : {}),
           ...(extra ?? {}),
         });
+        /** 顶栏选中那台（「默认目标」）用的那一份。 */
+        const envBody = (extra) => envBodyFor(envId, envProtected, extra);
 
         // 转圈用的 keyframes（内联样式写不了 @keyframes，注入一次）
         React.useEffect(() => {
@@ -951,6 +958,43 @@ window.__ModuleLoader__.load({
         };
 
         React.useEffect(() => clearPendingTimer, []);
+
+        /**
+         * 环境选择器（和上面「就地确认」同一手感）：点「部署 / 发布」不再直接发，
+         * 先就地展开一排环境，点哪台才真发。10 秒不点自动收回。
+         * pickFor 记的是哪个动作开了选择器：deploy|<项目> / release|<项目> / batch|deploy / batch|release。
+         */
+        const [pickFor, setPickFor] = React.useState('');
+        /** 选择器里受保护环境已经点过一次、还没确认：`${pickFor}|${环境 id}`。 */
+        const [armedPick, setArmedPick] = React.useState('');
+        const pickTimer = React.useRef(undefined);
+
+        const clearPickTimer = () => {
+          if (pickTimer.current !== undefined) {
+            window.clearTimeout(pickTimer.current);
+            pickTimer.current = undefined;
+          }
+        };
+
+        const closePick = () => {
+          clearPickTimer();
+          setPickFor('');
+          setArmedPick('');
+        };
+
+        const openPick = (key) => {
+          clearPickTimer();
+          clearPendingTimer();
+          setConfirmEnv('');
+          setPickFor(key);
+          setArmedPick('');
+          pickTimer.current = window.setTimeout(() => {
+            setPickFor('');
+            setArmedPick('');
+          }, 10000);
+        };
+
+        React.useEffect(() => clearPickTimer, []);
 
         /** 真正发清除请求。 */
         const runClear = async (ids, key, force) => {
@@ -1300,35 +1344,92 @@ window.__ModuleLoader__.load({
         };
 
         /**
-         * 卡片上的「部署 / 发布」：受保护环境第一次点只是把它举成「待确认」
-         * （按钮变红、文案变成「确认发到 生产」），第二次点才带 confirm 真发。
+         * 「部署 / 发布」的入口：只配一台（老 deploy.json）时点了就发；
+         * 配了多台时点一下先就地展开环境选择器（10 秒不点收回），点哪台才真发。
+         * 按住 Shift 点 = 跳过选择器，直接发顶栏选的那台。
+         * 受保护的环境两条路都要多点一次确认（按钮变红「确认发到 X」）。
          * 任务 id 与 Host 侧 lib/deploy.js 的 taskKeyOf 同一份规则，日志才对得上。
          */
         const armProtectedEnv = () => {
           setConfirmEnv(envId);
         };
-        const deployOne = (project) => {
+        /** 直发顶栏那台（单台配置或 Shift 点）。 */
+        const directTo = (kind, project) => {
           if (envProtected === true && armedEnv !== true) {
             armProtectedEnv();
             return;
           }
           setConfirmEnv('');
-          const key = taskKey('deploy', project.id);
+          const key = taskKey(kind, project.id);
           openLog(key);
-          void act(key, '/deploy', envBody({ projectId: project.id }));
+          const extra = kind === 'deploy' ? { projectId: project.id } : { projectId: project.id, clean, fast: fastBuild };
+          void act(key, kind === 'deploy' ? '/deploy' : '/release', envBody(extra));
         };
-        const releaseOne = (project) => {
-          if (envProtected === true && armedEnv !== true) {
-            armProtectedEnv();
+        const openEnvPicker = (kind, project, event) => {
+          if (deployServers.length <= 1 || event?.shiftKey === true) {
+            directTo(kind, project);
             return;
           }
-          setConfirmEnv('');
-          const key = taskKey('release', project.id);
-          openLog(key);
-          void act(key, '/release', envBody({ projectId: project.id, clean, fast: fastBuild }));
+          openPick(`${kind}|${project.id}`);
         };
+        /** 选择器里点某一台：受保护的先武装（再点一次才发），其余直接发。 */
+        const pickEnv = (kind, project, server) => {
+          const armedKey = `${pickFor}|${server.id}`;
+          if (server.protected === true && armedPick !== armedKey) {
+            setArmedPick(armedKey);
+            return;
+          }
+          closePick();
+          const key = keyFor(kind, project.id, server.id);
+          openLog(key);
+          const extra = kind === 'deploy' ? { projectId: project.id } : { projectId: project.id, clean, fast: fastBuild };
+          void act(key, kind === 'deploy' ? '/deploy' : '/release', envBodyFor(server.id, server.protected, extra));
+        };
+        /** 批量入口：同样先选环境（Shift = 直发顶栏那台）。 */
+        const openBatchPicker = (kind, event) => {
+          if (checkedIds.length === 0) {
+            setError(t('nothingSelected'));
+            return;
+          }
+          if (deployServers.length <= 1 || event?.shiftKey === true) {
+            if (envProtected === true && armedEnv !== true) {
+              armProtectedEnv();
+              return;
+            }
+            setConfirmEnv('');
+            void runBatch(kind === 'deploy' ? '/deploy-batch' : '/release-batch', checkedIds, envBody());
+            return;
+          }
+          openPick(`batch|${kind}`);
+        };
+        const pickBatch = (kind, server) => {
+          const armedKey = `${pickFor}|${server.id}`;
+          if (server.protected === true && armedPick !== armedKey) {
+            setArmedPick(armedKey);
+            return;
+          }
+          closePick();
+          void runBatch(kind === 'deploy' ? '/deploy-batch' : '/release-batch', checkedIds, envBodyFor(server.id, server.protected));
+        };
+        /** 选择器本体：`发布 → [开发] [测试] [确认发到 生产] [收起]`。 */
+        const envPicker = (actionLabel, onPick) => h('span', { style: styles.inlineConfirm },
+          h('span', { style: styles.confirmText }, actionLabel),
+          ...deployServers.map((server) => h('button', {
+            key: server.id,
+            type: 'button',
+            style: server.protected === true && armedPick === `${pickFor}|${server.id}` ? styles.buttonDanger : styles.button,
+            title: `${server.label} · ${server.user}@${server.host}:${server.port}${server.protected === true ? ` · ${t('deployEnvProtected')}` : ''}`,
+            onClick: () => onPick(server),
+          }, server.protected === true && armedPick === `${pickFor}|${server.id}`
+            ? `${t('deployEnvConfirm')} ${server.label}`
+            : server.label)),
+          h('button', { type: 'button', style: styles.button, onClick: closePick }, t('hide')));
         /** 按钮文案：待确认时点名是哪台，让人看清了再点。 */
         const envConfirmLabel = () => `${t('deployEnvConfirm')} ${currentServer?.label ?? envId}`;
+        /** 按钮悬停标题：点名默认目标，Shift 直发会发到哪一目了然。 */
+        const targetTitle = (project) => currentServer === undefined
+          ? `${t('deployTarget')}: ${project.deploy.remoteDir}`
+          : `${currentServer.label} · ${currentServer.user}@${currentServer.host} → ${project.deploy.remoteDir}`;
 
         const projectCard = (project) => {
           const run = runningMap.get(project.id);
@@ -1418,8 +1519,8 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   style: armedEnv === true ? styles.buttonDanger : styles.button,
                   disabled: isBusy || busy[taskKey('deploy', project.id)] === true,
-                  title: armedEnv === true ? t('deployEnvConfirmHint') : `${t('deployTarget')}: ${project.deploy.remoteDir}`,
-                  onClick: () => deployOne(project),
+                  title: armedEnv === true ? t('deployEnvConfirmHint') : `${targetTitle(project)}${deployServers.length > 1 ? ` · ${t('deployPickShiftHint')}` : ''}`,
+                  onClick: (event) => openEnvPicker('deploy', project, event),
                 }, busy[taskKey('deploy', project.id)] === true ? h(Spinner) : null, busy[taskKey('deploy', project.id)] === true ? t('working') : (armedEnv === true ? envConfirmLabel() : t('deploy')))
                 : null,
               typeof project.deploy === 'object' && project.deploy !== null
@@ -1427,9 +1528,15 @@ window.__ModuleLoader__.load({
                   type: 'button',
                   style: armedEnv === true ? styles.buttonDanger : styles.buttonPrimary,
                   disabled: isBusy || busy[taskKey('release', project.id)] === true,
-                  title: armedEnv === true ? t('deployEnvConfirmHint') : `打包 → 部署${project.deploy.container === undefined ? '' : ` → 重启 ${project.deploy.container}`}`,
-                  onClick: () => releaseOne(project),
+                  title: armedEnv === true ? t('deployEnvConfirmHint') : `${targetTitle(project)} · 打包 → 部署${project.deploy.container === undefined ? '' : ` → 重启 ${project.deploy.container}`}`,
+                  onClick: (event) => openEnvPicker('release', project, event),
                 }, busy[taskKey('release', project.id)] === true ? h(Spinner) : null, busy[taskKey('release', project.id)] === true ? t('releasing') : (armedEnv === true ? envConfirmLabel() : t('release')))
+                : null,
+              pickFor === `deploy|${project.id}`
+                ? envPicker(t('deploy'), (server) => pickEnv('deploy', project, server))
+                : null,
+              pickFor === `release|${project.id}`
+                ? envPicker(t('release'), (server) => pickEnv('release', project, server))
                 : null,
             ),
           );
@@ -1460,6 +1567,7 @@ window.__ModuleLoader__.load({
                 onChange: (event) => {
                   setDeployEnv(event.target.value);
                   setConfirmEnv('');
+                  closePick();
                   void refreshList();
                 },
               },
@@ -1536,29 +1644,21 @@ window.__ModuleLoader__.load({
               style: armedEnv === true ? styles.buttonDanger : styles.button,
               disabled: busy.batch === true || checkedIds.length === 0,
               title: armedEnv === true ? t('deployEnvConfirmHint') : t('deployEnvHint'),
-              onClick: () => {
-                if (envProtected === true && armedEnv !== true) {
-                  armProtectedEnv();
-                  return;
-                }
-                setConfirmEnv('');
-                void runBatch('/deploy-batch', checkedIds, envBody());
-              },
+              onClick: (event) => openBatchPicker('deploy', event),
             }, busy.batch === true ? h(Spinner) : null, busy.batch === true ? t('working') : (armedEnv === true ? envConfirmLabel() : t('deploySelected'))),
             h('button', {
               type: 'button',
               style: armedEnv === true ? styles.buttonDanger : styles.buttonPrimary,
               disabled: busy.batch === true || checkedIds.length === 0,
               title: armedEnv === true ? t('deployEnvConfirmHint') : t('deployEnvHint'),
-              onClick: () => {
-                if (envProtected === true && armedEnv !== true) {
-                  armProtectedEnv();
-                  return;
-                }
-                setConfirmEnv('');
-                void runBatch('/release-batch', checkedIds, envBody());
-              },
+              onClick: (event) => openBatchPicker('release', event),
             }, busy.batch === true ? h(Spinner) : null, busy.batch === true ? t('working') : (armedEnv === true ? envConfirmLabel() : t('releaseSelected'))),
+            pickFor === 'batch|deploy'
+              ? envPicker(t('deploySelected'), (server) => pickBatch('deploy', server))
+              : null,
+            pickFor === 'batch|release'
+              ? envPicker(t('releaseSelected'), (server) => pickBatch('release', server))
+              : null,
             h('span', { style: styles.spacer }),
             hidden.length === 0
               ? null
