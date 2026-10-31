@@ -6,9 +6,15 @@ import { join } from 'node:path';
 import {
   AUTO_CLEAR_DEFAULT,
   AUTO_CLEAR_DELAYS,
+  LEGACY_SERVER_ID,
+  buildDeployConfig,
+  deployTargetOf,
+  mergeServers,
   normalizeAutoClear,
+  publicDeployConfig,
   readDeployConfig,
   readPrefs,
+  resolveServer,
   writeDeployConfig,
   writePrefs,
 } from '../lib/prefs.js';
@@ -139,12 +145,13 @@ test('readDeployConfig：只认形状对的字段，空串和多余字段都丢�
   assert.equal('bad' in config.targets, false);
 }));
 
-test('readDeployConfig：坏文件回落 { targets: {} }', async () => await withRoot(async (root) => {
-  assert.deepEqual(await readDeployConfig(root), { targets: {} });
+test('readDeployConfig：坏文件回落「没有环境」（顶层字段一个不多）', async () => await withRoot(async (root) => {
+  const EMPTY = { servers: [], defaultServer: '', targets: {} };
+  assert.deepEqual(await readDeployConfig(root), EMPTY);
   await writeRaw(root, 'deploy.json', 'nope');
-  assert.deepEqual(await readDeployConfig(root), { targets: {} });
+  assert.deepEqual(await readDeployConfig(root), EMPTY);
   await writeRaw(root, 'deploy.json', JSON.stringify({ targets: 'x' }));
-  assert.deepEqual(await readDeployConfig(root), { targets: {} });
+  assert.deepEqual(await readDeployConfig(root), EMPTY);
 }));
 
 test('writeDeployConfig → readDeployConfig 往返：密码留在盘上（不回传浏览器是路由层的事）', async () => await withRoot(async (root) => {
@@ -159,3 +166,130 @@ test('writeDeployConfig → readDeployConfig 往返：密码留在盘上（不�
   assert.equal(config.targets.api.container, 'api');
   assert.ok((await readFile(join(root, '.dsh-devship', 'deploy.json'), 'utf8')).endsWith('\n'));
 }));
+
+test('老 deploy.json 合成成一台 default 环境：顶层字段照旧，目录还走公共表', async () => await withRoot(async (root) => {
+  await writeRaw(root, 'deploy.json', JSON.stringify({
+    host: '10.0.0.5', port: 22, user: 'deploy', password: 'old-pass',
+    restartCommand: 'docker restart api',
+    targets: { api: { remoteDir: '/srv/api' } },
+  }));
+  const config = await readDeployConfig(root);
+  assert.equal(config.defaultServer, LEGACY_SERVER_ID);
+  assert.deepEqual(config.servers.map((server) => server.id), [LEGACY_SERVER_ID]);
+  assert.equal(config.servers[0].label, '默认');
+  assert.equal(config.servers[0].host, '10.0.0.5');
+  assert.equal(config.servers[0].password, 'old-pass', 'Host 内部要能拿到明文才能连 SSH');
+  assert.equal(config.host, '10.0.0.5', '顶层形状一个字段都不动');
+
+  const resolved = resolveServer(config, undefined);
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.server.id, LEGACY_SERVER_ID);
+  assert.equal(deployTargetOf(config, resolved.server, 'api').remoteDir, '/srv/api');
+  assert.equal(deployTargetOf(config, resolved.server, '没有这个项目'), undefined);
+}));
+
+test('多环境往返：目录覆盖优先、顶层镜像默认那台、明文不回传浏览器', async () => await withRoot(async (root) => {
+  await writeDeployConfig(root, {
+    defaultServer: 'dev',
+    servers: [
+      { id: 'dev', label: '开发', host: '10.0.0.5', user: 'deploy', password: 'dev-pass', targets: { api: { remoteDir: '/srv/dev/api' } } },
+      { id: 'prod', label: '生产', host: 'prod.example.com', user: 'release', protected: true, restartCommand: 'docker restart api', targets: { api: { remoteDir: '/data/apps/api' } } },
+    ],
+    targets: { api: { remoteDir: '/srv/common/api' }, web: { remoteDir: '/srv/common/web' } },
+  });
+  const config = await readDeployConfig(root);
+  assert.equal(config.defaultServer, 'dev');
+  assert.deepEqual(config.servers.map((server) => server.id), ['dev', 'prod']);
+  assert.equal(config.host, '10.0.0.5', '顶层 host 镜像默认那一台，老面板照常对话');
+  assert.equal(config.user, 'deploy');
+  assert.equal('password' in config, false, '新形状的明文只留在各环境条目里');
+
+  const dev = resolveServer(config, 'dev').server;
+  const prod = resolveServer(config, 'prod').server;
+  assert.equal(deployTargetOf(config, dev, 'api').remoteDir, '/srv/dev/api');
+  assert.equal(deployTargetOf(config, prod, 'api').remoteDir, '/data/apps/api');
+  assert.equal(deployTargetOf(config, prod, 'web').remoteDir, '/srv/common/web', '这个环境没配就用公共那份');
+  assert.equal(prod.protected, true);
+  assert.equal(prod.restartCommand, 'docker restart api');
+
+  const publicConfig = publicDeployConfig(config);
+  assert.equal(JSON.stringify(publicConfig).includes('dev-pass'), false, '整个回传里不许出现明文');
+  assert.equal(publicConfig.servers[0].hasPassword, true);
+  assert.equal(publicConfig.servers[1].hasPassword, false);
+  assert.equal(publicConfig.hasPassword, true, '顶层 hasPassword 跟的是默认那台');
+  assert.equal(publicConfig.servers[0].isDefault, true);
+  assert.equal(publicConfig.servers[1].isDefault, false);
+}));
+
+test('publicDeployConfig：老形状合成出来的那一台也不能把明文带出去', async () => await withRoot(async (root) => {
+  await writeRaw(root, 'deploy.json', JSON.stringify({ host: 'h', user: 'u', password: 's3cret', targets: { api: { remoteDir: '/srv/api' } } }));
+  const config = await readDeployConfig(root);
+  const publicConfig = publicDeployConfig(config);
+  assert.equal('password' in publicConfig, false);
+  assert.equal('password' in publicConfig.servers[0], false);
+  assert.equal(publicConfig.servers[0].hasPassword, true);
+  assert.equal(JSON.stringify(publicConfig).includes('s3cret'), false);
+}));
+
+test('mergeServers：密码留空保持已存、clearPassword 才真删，按环境各算一份', () => {
+  const stored = {
+    servers: [
+      { id: 'dev', label: '开发', password: 'dev-old', restartCommand: 'docker restart dev' },
+      { id: 'prod', label: '生产', password: 'prod-old' },
+    ],
+  };
+  const merged = mergeServers([
+    { id: 'dev', label: '开发', host: '10.0.0.5' },
+    { id: 'prod', label: '生产', password: 'prod-new' },
+  ], stored);
+  assert.equal(merged.find((server) => server.id === 'dev').password, 'dev-old');
+  assert.equal(merged.find((server) => server.id === 'dev').restartCommand, 'docker restart dev');
+  assert.equal(merged.find((server) => server.id === 'prod').password, 'prod-new');
+
+  const cleared = mergeServers([{ id: 'dev', clearPassword: true, clearRestartCommand: true }, { id: 'prod' }], stored);
+  assert.equal('password' in cleared.find((server) => server.id === 'dev'), false);
+  assert.equal('restartCommand' in cleared.find((server) => server.id === 'dev'), false);
+  assert.equal(cleared.find((server) => server.id === 'prod').password, 'prod-old', '没动的环境不该被清掉');
+});
+
+test('mergeServers：id 不合法、重复、超过上限都是错误，不静默吞掉', () => {
+  assert.throws(() => mergeServers([{ id: 'DEV server' }], { servers: [] }), /只能用字母/u);
+  assert.throws(() => mergeServers([{ id: 'dev_api' }], { servers: [] }), /只能用字母/u);
+  assert.throws(() => mergeServers([{ id: 'dev' }, { id: 'dev' }], { servers: [] }), /环境 id 重复: dev/u);
+  assert.throws(() => mergeServers([], { servers: [] }), /至少要有 1 个环境/u);
+  assert.throws(() => mergeServers('nope', { servers: [] }), /缺少 servers 数组/u);
+  const many = Array.from({ length: 13 }, (_unused, index) => ({ id: `srv${index}` }));
+  assert.throws(() => mergeServers(many, { servers: [] }), /最多 12 个环境/u);
+});
+
+test('buildDeployConfig：defaultServer 挑不到就回落第一个；没送 targets 字段保持已存的', () => {
+  const stored = {
+    servers: [{ id: 'dev', label: '开发', targets: { api: { remoteDir: '/old/api' } } }],
+    targets: { web: { remoteDir: '/common/web' } },
+  };
+  const kept = buildDeployConfig({ defaultServer: '没有这个环境', servers: [{ id: 'dev', host: 'h' }] }, stored);
+  assert.equal(kept.defaultServer, 'dev');
+  assert.deepEqual(kept.targets, { web: { remoteDir: '/common/web' } }, '没送 targets 字段不该把公共表清空');
+  assert.deepEqual(kept.servers[0].targets, { api: { remoteDir: '/old/api' } }, '没送环境目录不该把覆盖表清空');
+
+  const rebuilt = buildDeployConfig({
+    servers: [{ id: 'prod', host: 'p.example.com', user: 'r', port: 2222, password: 'secret' }],
+    targets: {},
+  }, stored);
+  assert.equal(rebuilt.defaultServer, 'prod');
+  assert.equal(rebuilt.host, 'p.example.com');
+  assert.equal(rebuilt.port, 2222);
+  assert.equal('password' in rebuilt, false, '顶层不镜像密码');
+  assert.deepEqual(rebuilt.targets, {}, '送空对象就是真清空');
+});
+
+test('resolveServer：没有环境、id 未知都返回 ok:false，报错交给路由', () => {
+  const none = resolveServer({ servers: [], defaultServer: '' }, 'dev');
+  assert.equal(none.ok, false);
+  assert.match(none.error, /还没有配置部署服务器/u);
+  const unknown = resolveServer({ servers: [{ id: 'dev' }], defaultServer: 'dev' }, 'ghost');
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error, /未知环境: ghost/u);
+  assert.equal(resolveServer({ servers: [{ id: 'dev' }], defaultServer: 'dev' }, undefined).server.id, 'dev');
+  assert.equal(resolveServer({ servers: [{ id: 'dev' }], defaultServer: 'dev' }, '').server.id, 'dev');
+});

@@ -10,7 +10,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { portBusy } from './lib/net.js';
 import { createWarn } from './lib/log.js';
-import { AUTO_CLEAR_DELAYS, normalizeAutoClear, readDeployConfig, readPrefs, readSshHosts, writeDeployConfig, writePrefs } from './lib/prefs.js';
+import { AUTO_CLEAR_DELAYS, buildDeployConfig, buildLegacyDeployConfig, deployTargetOf, normalizeAutoClear, publicDeployConfig, readDeployConfig, readPrefs, readSshHosts, resolveServer, writeDeployConfig, writePrefs } from './lib/prefs.js';
 import { logFileFor, pidsAliveAsync, publicEntry, tailOf } from './lib/state.js';
 import { readTail } from './lib/util.js';
 
@@ -19,8 +19,10 @@ const PREFIX = '/dsh-devship';
 /**
  * 协议版本：路由路径或响应结构变了就 +1，Host 与 client.js 必须同步改。
  * /version 与 /diagnostics 里的版本号都从这里取，不再各写一份。
+ * 4 → 5：多环境部署。路径没加新的，只多了 `serverId` / `confirm` 请求字段和
+ * `servers` / `defaultServer` 响应字段——老 client 配新 Host、新 client 配老 Host 都不炸。
  */
-const PROTOCOL = 4;
+const PROTOCOL = 5;
 
 /** /log 一次最多回给浏览器多少字节（只读文件尾部，不整文件进内存）。 */
 const LOG_TAIL_BYTES = 3_000_000;
@@ -77,6 +79,46 @@ export function createRoutes(ctx, core) {
 
   /** 端口探测 / 接管失败这类「只影响界面」的问题写进 Host 日志。 */
   const warn = createWarn(ctx);
+
+  /**
+   * 回给浏览器的环境摘要：只有 id / 名称 / 地址 / 「有没有存过密码」。
+   * 走 publicDeployConfig 这一道，明文不可能从这里漏出去。
+   */
+  function serverSummary(config) {
+    return publicDeployConfig(config).servers.map((server) => ({
+      id: server.id,
+      label: server.label,
+      host: typeof server.host === 'string' ? server.host : '',
+      port: Number.isInteger(server.port) ? server.port : 22,
+      user: typeof server.user === 'string' ? server.user : '',
+      alias: typeof server.alias === 'string' ? server.alias : '',
+      protected: server.protected === true,
+      hasPassword: server.hasPassword === true,
+      isDefault: server.isDefault === true,
+    }));
+  }
+
+  /** 这次要发哪台：挑不到就回落默认那台（面板别因为一个坏 id 就空掉）。 */
+  function listServer(config, serverId) {
+    const resolved = resolveServer(config, serverId);
+    if (resolved.ok === true) return resolved.server;
+    const servers = Array.isArray(config.servers) ? config.servers : [];
+    return servers.find((server) => server.id === config.defaultServer) ?? servers[0];
+  }
+
+  /**
+   * 部署 / 发布用的环境挑选：挑不到、或者那台是受保护的而这次没带 confirm，直接报错。
+   * @returns {{ ok: true, server: object } | { ok: false, error: string }}
+   */
+  async function pickServer(root, body) {
+    const config = await readDeployConfig(root);
+    const resolved = resolveServer(config, body.serverId);
+    if (resolved.ok !== true) return { ok: false, error: resolved.error };
+    if (resolved.server.protected === true && body.confirm !== true) {
+      return { ok: false, error: `发「${resolved.server.label}」需要再点一次确认` };
+    }
+    return { ok: true, server: resolved.server };
+  }
 
   async function status(root, logFor) {
     // 端口探测：让面板也能标出「已被外部实例占用」的服务（IDEA/终端起的那些）
@@ -244,11 +286,22 @@ export function createRoutes(ctx, core) {
           const scanned = await scan(root, body.force === true);
           const prefs = await readPrefs(root);
           const deploy = await readDeployConfig(root);
+          // 卡片上的「部署 / 发布」是按面板当前选中的那个环境算的
+          const server = listServer(deploy, body.serverId);
           const projects = scanned.projects.map((project) => {
-            const target = deploy.targets[project.id];
+            const target = deployTargetOf(deploy, server, project.id);
             return target === undefined ? project : { ...project, deploy: target };
           });
-          sendJson(res, 200, { ok: true, root: scanned.root, projects, hidden: prefs.hidden, autoClear: prefs.autoClear, deployAlias: deploy.alias ?? '' });
+          sendJson(res, 200, {
+            ok: true,
+            root: scanned.root,
+            projects,
+            hidden: prefs.hidden,
+            autoClear: prefs.autoClear,
+            deployAlias: server?.alias ?? '',
+            servers: serverSummary(deploy),
+            defaultServer: typeof deploy.defaultServer === 'string' ? deploy.defaultServer : '',
+          });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) });
         }
@@ -296,12 +349,11 @@ export function createRoutes(ctx, core) {
           // 没有 config 字段 = 读取（客户端用 POST 带 root 来读，避免 GET 不能带 body）
           if (req.method === 'GET' || body.config === undefined) {
             const config = await readDeployConfig(root);
-            // 明文密码只留在 Host 侧：回给浏览器的只有「有没有存过」
-            const { password, ...publicConfig } = config;
             const hosts = await readSshHosts();
             sendJson(res, 200, {
               ok: true,
-              config: { ...publicConfig, hasPassword: typeof password === 'string' && password !== '' },
+              // 明文密码只留在 Host 侧：回给浏览器的只有「每台存没存过」和各环境的远端目录
+              config: publicDeployConfig(config),
               hosts: hosts.map((host) => ({ alias: host.alias, host: host.host, user: host.user, port: host.port, auth: host.auth?.kind ?? 'key' })),
             });
             return;
@@ -309,41 +361,14 @@ export function createRoutes(ctx, core) {
           const incoming = body.config;
           if (incoming === null || typeof incoming !== 'object') throw new Error('缺少 config 对象');
           const stored = await readDeployConfig(root);
-          const config = {
-            ...typeof incoming.alias === 'string' && incoming.alias !== '' ? { alias: incoming.alias } : {},
-            ...typeof incoming.host === 'string' && incoming.host !== '' ? { host: incoming.host } : {},
-            ...Number.isInteger(incoming.port) ? { port: incoming.port } : {},
-            ...typeof incoming.user === 'string' && incoming.user !== '' ? { user: incoming.user } : {},
-            targets: {},
-          };
-          // 密码与重启命令：面板读回来的是 hasPassword，所以「留空 = 保持原值」，
-          // 要清空得显式带 clearPassword / clearRestartCommand。
-          if (body.clearPassword === true) {
-            // 什么都不写：这次就是要把存着的密码删掉
-          } else if (typeof incoming.password === 'string' && incoming.password !== '') {
-            config.password = incoming.password;
-          } else if (typeof stored.password === 'string' && stored.password !== '') {
-            config.password = stored.password;
-          }
-          if (body.clearRestartCommand === true) {
-            // 同上：显式清除
-          } else if (typeof incoming.restartCommand === 'string' && incoming.restartCommand !== '') {
-            config.restartCommand = incoming.restartCommand;
-          } else if (typeof stored.restartCommand === 'string' && stored.restartCommand !== '') {
-            config.restartCommand = stored.restartCommand;
-          }
-          for (const [id, target] of Object.entries(incoming.targets ?? {})) {
-            if (target === null || typeof target !== 'object') continue;
-            if (typeof target.remoteDir !== 'string' || target.remoteDir === '') continue;
-            config.targets[id] = {
-              remoteDir: target.remoteDir,
-              ...typeof target.artifact === 'string' && target.artifact !== '' ? { artifact: target.artifact } : {},
-              ...typeof target.container === 'string' && target.container !== '' ? { container: target.container } : {},
-            };
-          }
+          const config = Array.isArray(incoming.servers)
+            // 新形状：多台环境，密码与重启命令按环境各算一份「留空保持、显式清除」
+            ? buildDeployConfig(incoming, stored)
+            : buildLegacyDeployConfig(body, incoming, stored);
           await writeDeployConfig(root, config);
-          const { password, ...publicConfig } = config;
-          sendJson(res, 200, { ok: true, config: { ...publicConfig, hasPassword: typeof password === 'string' && password !== '' } });
+          // 回读一遍：回给浏览器的形状和下一次读取完全一致（老形状也会被归一化成同一份）
+          const written = await readDeployConfig(root);
+          sendJson(res, 200, { ok: true, config: publicDeployConfig(written) });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) });
         }
@@ -355,10 +380,12 @@ export function createRoutes(ctx, core) {
         try {
           const body = await readJsonBody(req);
           const root = await effectiveRoot(body.root);
+          const picked = await pickServer(root, body);
+          if (picked.ok !== true) throw new Error(picked.error);
           const { projects } = await scan(root);
           const project = projects.find((candidate) => candidate.id === body.projectId);
           if (project === undefined) throw new Error(`未知项目: ${String(body.projectId)}`);
-          const entry = await deployProject(project, root);
+          const entry = await deployProject(project, root, undefined, picked.server.id);
           sendJson(res, 200, { ok: true, entry: publicEntry(entry) });
         } catch (error) {
           sendJson(res, 200, {
@@ -377,13 +404,15 @@ export function createRoutes(ctx, core) {
           const ids = Array.isArray(body.projectIds) ? body.projectIds.filter((item) => typeof item === 'string' && item !== '') : [];
           if (ids.length === 0) throw new Error('没有选中任何项目');
           const root = await effectiveRoot(body.root);
+          const picked = await pickServer(root, body);
+          if (picked.ok !== true) throw new Error(picked.error);
           const { projects } = await scan(root);
           const results = [];
           for (const id of ids.slice(0, 20)) {
             try {
               const project = projects.find((candidate) => candidate.id === id);
               if (project === undefined) throw new Error(`未知项目: ${id}`);
-              await deployProject(project, root);
+              await deployProject(project, root, undefined, picked.server.id);
               results.push({ id, ok: true });
             } catch (error) {
               results.push({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -401,10 +430,12 @@ export function createRoutes(ctx, core) {
         try {
           const body = await readJsonBody(req);
           const root = await effectiveRoot(body.root);
+          const picked = await pickServer(root, body);
+          if (picked.ok !== true) throw new Error(picked.error);
           const { projects } = await scan(root);
           const project = projects.find((candidate) => candidate.id === body.projectId);
           if (project === undefined) throw new Error(`未知项目: ${String(body.projectId)}`);
-          const entry = await releaseProject(project, root, { clean: body.clean === true, fast: body.fast === true });
+          const entry = await releaseProject(project, root, { clean: body.clean === true, fast: body.fast === true, serverId: picked.server.id, serverLabel: picked.server.label });
           sendJson(res, 200, { ok: true, entry: publicEntry(entry) });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -419,13 +450,15 @@ export function createRoutes(ctx, core) {
           const ids = Array.isArray(body.projectIds) ? body.projectIds.filter((item) => typeof item === 'string' && item !== '') : [];
           if (ids.length === 0) throw new Error('没有选中任何项目');
           const root = await effectiveRoot(body.root);
+          const picked = await pickServer(root, body);
+          if (picked.ok !== true) throw new Error(picked.error);
           const { projects } = await scan(root);
           const results = [];
           for (const id of ids.slice(0, 20)) {
             try {
               const project = projects.find((candidate) => candidate.id === id);
               if (project === undefined) throw new Error(`未知项目: ${id}`);
-              await releaseProject(project, root, { clean: body.clean === true, fast: body.fast === true });
+              await releaseProject(project, root, { clean: body.clean === true, fast: body.fast === true, serverId: picked.server.id, serverLabel: picked.server.label });
               results.push({ id, ok: true });
             } catch (error) {
               results.push({ id, ok: false, error: error instanceof Error ? error.message : String(error) });

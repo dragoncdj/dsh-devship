@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const DICT = {
       zh: {
         panel: '研发直发台',
-        guide: '扫描工作区的微服务与前端：一键启动 / 停止、打包、部署到测试机并重启容器',
+        guide: '扫描工作区的微服务与前端：一键启动 / 停止、打包、部署到开发 / 测试 / 生产服务器并重启容器',
         title: '研发直发台',
         refresh: '刷新',
         buildAll: '全量打包',
@@ -80,7 +80,6 @@ window.__ModuleLoader__.load({
         deployConfig: '部署配置',
         deploySave: '保存配置',
         deploySaved: '部署配置已保存',
-        deployServer: '测试服务器',
         deployHost: '地址（IP/域名）',
         deployPort: '端口',
         deployUser: '用户',
@@ -89,10 +88,30 @@ window.__ModuleLoader__.load({
         deployPasswordClear: '清除已存密码',
         deployPasswordClearHint: '删掉 deploy.json 里存着的密码；下次部署改用密钥，或在这里重新填',
         deployAliasHint: '可选：dsh-ssh 主机别名（留空则用上面的地址）',
-        deployTargetsTitle: '各服务部署目录',
         deployRemoteDir: '远端目录（留空 = 不部署）',
         deployContainer: '容器名',
         deployTarget: '远端目录',
+        deployEnv: '发布环境',
+        deployEnvHint: '「部署 / 发布」发往哪台服务器',
+        deployEnvNone: '还没配服务器：点「部署配置」',
+        deployEnvDefaultBadge: '默认',
+        deployEnvProtected: '受保护',
+        deployEnvProtectedHint: '勾上：发这台之前要多确认一次，防手滑',
+        deployEnvConfirm: '确认发到',
+        deployEnvConfirmHint: '这台是受保护环境：再点一次才真发',
+        deployEnvAdd: '加一个环境',
+        deployEnvRemove: '删除这台',
+        deployEnvSetDefault: '设为默认',
+        deployEnvIdHint: 'id：小写字母、数字和 -（任务与日志文件名用它）',
+        deployEnvLabelHint: '名称（面板上显示）',
+        deployEnvRestartHint: '重启命令（{container} 会换成容器名）',
+        deployEnvTargetsTitle: '这台的远端目录（留空 = 用公共的）',
+        deploySharedTargetsTitle: '公共远端目录（哪台都没配时用它）',
+        deployEnvMigrate: '拆成开发 / 测试 / 生产',
+        deployEnvMigrateHint: '把你现在这台填进「开发」，再生成测试和生产两台空的；点了还没保存，要再点「保存配置」',
+        envSeedDev: '开发',
+        envSeedTest: '测试',
+        envSeedProd: '生产',
         release: '发布',
         releaseSelected: '发布选中',
         fastBuild: '快速打包',
@@ -176,7 +195,6 @@ window.__ModuleLoader__.load({
         deployConfig: 'Deploy config',
         deploySave: 'Save config',
         deploySaved: 'Deploy config saved',
-        deployServer: 'Test server',
         deployHost: 'host (IP/domain)',
         deployPort: 'port',
         deployUser: 'user',
@@ -185,10 +203,30 @@ window.__ModuleLoader__.load({
         deployPasswordClear: 'clear saved password',
         deployPasswordClearHint: 'remove the password stored in deploy.json; next deploy uses the key, or type a new one here',
         deployAliasHint: 'optional: dsh-ssh alias (leave empty to use the address above)',
-        deployTargetsTitle: 'Deploy directories',
         deployRemoteDir: 'remote dir (empty = skip)',
         deployContainer: 'container',
         deployTarget: 'remote dir',
+        deployEnv: 'Deploy target',
+        deployEnvHint: 'which server Deploy and Release go to',
+        deployEnvNone: 'No server configured: open Deploy config',
+        deployEnvDefaultBadge: 'default',
+        deployEnvProtected: 'protected',
+        deployEnvProtectedHint: 'checked: deploys to this one need one more confirmation',
+        deployEnvConfirm: 'Confirm deploy to',
+        deployEnvConfirmHint: 'this environment is protected: click once more to actually deploy',
+        deployEnvAdd: 'Add environment',
+        deployEnvRemove: 'Remove',
+        deployEnvSetDefault: 'Make default',
+        deployEnvIdHint: 'id: lowercase letters, digits and - (used in task and log names)',
+        deployEnvLabelHint: 'label (shown in the panel)',
+        deployEnvRestartHint: 'restart command ({container} is replaced with the container name)',
+        deployEnvTargetsTitle: 'remote dirs for this environment (empty = use the shared ones)',
+        deploySharedTargetsTitle: 'shared remote dirs (used when no environment has one)',
+        deployEnvMigrate: 'Split into dev / test / prod',
+        deployEnvMigrateHint: 'your current server becomes “dev”; test and prod are added empty. Nothing is saved until you press Save.',
+        envSeedDev: 'Dev',
+        envSeedTest: 'Test',
+        envSeedProd: 'Prod',
         release: 'Release',
         releaseSelected: 'Release selected',
         fastBuild: 'Fast build',
@@ -567,11 +605,18 @@ window.__ModuleLoader__.load({
         const [autoClear, setAutoClear] = React.useState({ build: false, deploy: false, release: false, delayMs: 15000 });
         /** 部署配置编辑器状态。 */
         const [deployOpen, setDeployOpen] = React.useState(false);
-        /** 服务器连接信息：host/port/user/password，alias 可选（dsh-ssh 里的别名）。 */
-        const [deployForm, setDeployForm] = React.useState({ host: '', port: '', user: '', password: '', alias: '' });
-        /** Host 只告诉我们「deploy.json 里存没存密码」，明文不进浏览器。 */
-        const [deployHasPassword, setDeployHasPassword] = React.useState(false);
-        /** 每个项目的远端目录（空 = 不部署）。 */
+        /** 面板要发哪台环境（id）；空 = 用 Host 的默认那台。 */
+        const [deployEnv, setDeployEnv] = React.useState('');
+        /** /list 带回来的环境摘要：id / 名称 / 地址 / 受保护 / 有没有存过密码（明文不出 Host）。 */
+        const [deployServers, setDeployServers] = React.useState([]);
+        const [deployDefaultEnv, setDeployDefaultEnv] = React.useState('');
+        /** 受保护环境点第一次只是「待确认」，这里记着是哪台。 */
+        const [confirmEnv, setConfirmEnv] = React.useState('');
+        /** 配置面板里的环境草稿（保存前可以随便改）。 */
+        const [envRows, setEnvRows] = React.useState([]);
+        /** 草稿里哪一台是默认（不带 serverId 的请求就发这台）。 */
+        const [draftDefault, setDraftDefault] = React.useState('');
+        /** 公共远端目录：哪台环境都没配这个服务时用它（就是老 deploy.json 的那份 targets）。 */
         const [deployTargets, setDeployTargets] = React.useState({});
         /** 每个项目的容器名（部署后 docker restart 用，空 = 不重启）。 */
         const [deployContainers, setDeployContainers] = React.useState({});
@@ -579,6 +624,27 @@ window.__ModuleLoader__.load({
         const [deployNote, setDeployNote] = React.useState('');
         /** 正在刷新列表（扫描工作区可能要几秒，用转圈给出反馈）。 */
         const [busyRefresh, setBusyRefresh] = React.useState(false);
+
+        /**
+         * 老 deploy.json（只有一台）在 Host 侧合成出来的那一台叫 default：
+         * 这一台的任务 id 和日志文件名不带环境后缀，与 2.1.x 逐字节一致。
+         * 这一份规则必须和 lib/deploy.js 的 taskKeyOf 保持一致。
+         */
+        const LEGACY_ENV = 'default';
+        const envId = deployServers.some((server) => server.id === deployEnv) ? deployEnv : deployDefaultEnv;
+        const currentServer = deployServers.find((server) => server.id === envId);
+        const envProtected = currentServer?.protected === true;
+        /** 受保护环境已经点过一次了：按钮变成「确认发到 X」，再点才真发。 */
+        const armedEnv = envProtected === true && confirmEnv === envId;
+        const taskKey = (kind, projectId) => envId === '' || envId === LEGACY_ENV
+          ? `${kind}:${projectId}`
+          : `${kind}_${envId}_${projectId}`;
+        /** 每次要发都带上环境；受保护环境第二次点才带 confirm。 */
+        const envBody = (extra) => ({
+          ...(envId === '' ? {} : { serverId: envId }),
+          ...(envProtected === true ? { confirm: true } : {}),
+          ...(extra ?? {}),
+        });
 
         // 转圈用的 keyframes（内联样式写不了 @keyframes，注入一次）
         React.useEffect(() => {
@@ -610,13 +676,18 @@ window.__ModuleLoader__.load({
         const refreshList = React.useCallback(async (force) => {
           setBusyRefresh(true);
           try {
-            const payload = await post('/list', force === true ? { force: true } : undefined);
+            const payload = await post('/list', {
+              ...(force === true ? { force: true } : {}),
+              ...(envId === '' ? {} : { serverId: envId }),
+            });
             if (payload.ok === true) {
               const list = Array.isArray(payload.projects) ? payload.projects : [];
               setProjects(list);
               setRoot(typeof payload.root === 'string' ? payload.root : '');
               setHidden(Array.isArray(payload.hidden) ? payload.hidden : []);
               setAutoClear(normalizeAutoClear(payload.autoClear));
+              setDeployServers(Array.isArray(payload.servers) ? payload.servers : []);
+              setDeployDefaultEnv(typeof payload.defaultServer === 'string' ? payload.defaultServer : '');
               // 已不存在的项目从勾选集合里剔除
               setChecked((current) => {
                 const ids = new Set(list.map((project) => project.id));
@@ -640,7 +711,7 @@ window.__ModuleLoader__.load({
           } finally {
             setBusyRefresh(false);
           }
-        }, [t]);
+        }, [t, envId]);
 
         /** Host 只回选中那条的 tail：其余条目这一轮没带，就沿用上轮已经拿到的那份。 */
         const keepTail = React.useCallback((next, previous) => next.map((entry) => {
@@ -822,8 +893,8 @@ window.__ModuleLoader__.load({
           await refreshStatus({ force: true });
         };
 
-        /** 批量启动 / 停止选中项，汇总失败信息。 */
-        const runBatch = async (path, ids) => {
+        /** 批量启动 / 停止 / 部署 / 发布选中项，汇总失败信息。 */
+        const runBatch = async (path, ids, extra) => {
           if (ids.length === 0) {
             setError(t('nothingSelected'));
             return;
@@ -831,7 +902,7 @@ window.__ModuleLoader__.load({
           setBusy((current) => ({ ...current, batch: true }));
           setError('');
           try {
-            const payload = await post(path, { projectIds: ids, profile, clean, fast: fastBuild, detach: detachRun });
+            const payload = await post(path, { projectIds: ids, profile, clean, fast: fastBuild, detach: detachRun, ...(extra ?? {}) });
             if (payload.ok !== true) {
               setError(errorText(payload.error, t('errorTitle')));
               return;
@@ -956,6 +1027,52 @@ window.__ModuleLoader__.load({
         const checkedIds = visibleProjects.filter((project) => checked[project.id] === true).map((project) => project.id);
         const allChecked = visibleProjects.length > 0 && checkedIds.length === visibleProjects.length;
 
+        /** Host 回的 target 表拆成「远端目录」和「容器名」两张表，面板上好编辑。 */
+        const splitTargets = (value) => {
+          const remoteDirs = {};
+          const containers = {};
+          for (const [id, target] of Object.entries(value ?? {})) {
+            if (target === null || typeof target !== 'object') continue;
+            if (typeof target.remoteDir === 'string') remoteDirs[id] = target.remoteDir;
+            if (typeof target.container === 'string') containers[id] = target.container;
+          }
+          return { remoteDirs, containers };
+        };
+
+        /** 一台环境的编辑草稿。密码从来不进浏览器：只有 hasPassword 这个布尔。 */
+        const emptyEnvRow = (id) => ({
+          id,
+          label: id,
+          host: '',
+          port: '',
+          user: '',
+          password: '',
+          alias: '',
+          restartCommand: '',
+          protected: false,
+          hasPassword: false,
+          clearPassword: false,
+          remoteDirs: {},
+          containers: {},
+        });
+
+        const envRowOf = (server) => {
+          const split = splitTargets(server.targets);
+          return {
+            ...emptyEnvRow(typeof server.id === 'string' ? server.id : ''),
+            label: typeof server.label === 'string' && server.label !== '' ? server.label : server.id,
+            host: typeof server.host === 'string' ? server.host : '',
+            port: Number.isInteger(server.port) ? String(server.port) : '',
+            user: typeof server.user === 'string' ? server.user : '',
+            alias: typeof server.alias === 'string' ? server.alias : '',
+            restartCommand: typeof server.restartCommand === 'string' ? server.restartCommand : '',
+            protected: server.protected === true,
+            hasPassword: server.hasPassword === true,
+            remoteDirs: split.remoteDirs,
+            containers: split.containers,
+          };
+        };
+
         /** 打开 / 关闭部署配置（打开时拉一次当前配置和可用主机）。 */
         const toggleDeployConfig = async () => {
           if (deployOpen) {
@@ -972,24 +1089,17 @@ window.__ModuleLoader__.load({
             const payload = await response.json();
             if (payload.ok === true) {
               const config = payload.config ?? {};
-              setDeployForm({
-                host: typeof config.host === 'string' ? config.host : '',
-                port: Number.isInteger(config.port) ? String(config.port) : '',
-                user: typeof config.user === 'string' ? config.user : '',
-                // Host 不再回传明文密码：输入框留空，占位符说明「不改就保持原值」
-                password: '',
-                alias: typeof config.alias === 'string' ? config.alias : '',
-              });
-              setDeployHasPassword(config.hasPassword === true);
-              const targets = {};
-              const containers = {};
-              for (const [id, target] of Object.entries(config.targets ?? {})) {
-                if (target === null || typeof target !== 'object') continue;
-                if (typeof target.remoteDir === 'string') targets[id] = target.remoteDir;
-                if (typeof target.container === 'string') containers[id] = target.container;
-              }
-              setDeployTargets(targets);
-              setDeployContainers(containers);
+              const servers = Array.isArray(config.servers) ? config.servers : [];
+              // 老 Host（协议 4）没有 servers：按顶层字段拼一台，面板照样能用
+              const rows = servers.length > 0
+                ? servers.map(envRowOf)
+                : [envRowOf({ id: LEGACY_ENV, host: config.host, port: config.port, user: config.user, alias: config.alias, restartCommand: config.restartCommand, hasPassword: config.hasPassword })];
+              setEnvRows(rows);
+              const defaultId = typeof config.defaultServer === 'string' && config.defaultServer !== '' ? config.defaultServer : rows[0].id;
+              setDraftDefault(rows.some((row) => row.id === defaultId) ? defaultId : rows[0].id);
+              const shared = splitTargets(config.targets);
+              setDeployTargets(shared.remoteDirs);
+              setDeployContainers(shared.containers);
               setDeployHosts(Array.isArray(payload.hosts) ? payload.hosts : []);
               setDeployOpen(true);
             } else {
@@ -1000,40 +1110,59 @@ window.__ModuleLoader__.load({
           }
         };
 
-        /** 保存部署配置：服务器地址 + 每个项目的远端目录。密码留空 = 保持 Host 上已存的值。 */
-        const saveDeployConfig = async (options = {}) => {
-          const config = {
-            ...deployForm.host.trim() === '' ? {} : { host: deployForm.host.trim() },
-            ...deployForm.port.trim() === '' || !Number.isInteger(Number(deployForm.port)) ? {} : { port: Number(deployForm.port) },
-            ...deployForm.user.trim() === '' ? {} : { user: deployForm.user.trim() },
-            ...deployForm.password === '' ? {} : { password: deployForm.password },
-            ...deployForm.alias.trim() === '' ? {} : { alias: deployForm.alias.trim() },
-            targets: {},
-          };
-          for (const [id, remoteDir] of Object.entries(deployTargets)) {
+        /** 一台环境的远端目录表 → 请求体里的 targets。 */
+        const targetsBody = (remoteDirs, containers) => {
+          const targets = {};
+          for (const [id, remoteDir] of Object.entries(remoteDirs)) {
             if (typeof remoteDir !== 'string' || remoteDir.trim() === '') continue;
-            const container = typeof deployContainers[id] === 'string' ? deployContainers[id].trim() : '';
-            config.targets[id] = {
+            const container = typeof containers[id] === 'string' ? containers[id].trim() : '';
+            targets[id] = {
               remoteDir: remoteDir.trim(),
               ...container === '' ? {} : { container },
             };
           }
+          return targets;
+        };
+
+        /**
+         * 保存环境列表。密码沿用老口径：留空 = 保持 Host 上已存的值，
+         * 要清掉得带 clearPassword（每台各算一份）。
+         */
+        const saveEnvRows = async (rows) => {
+          const config = {
+            defaultServer: draftDefault,
+            servers: rows.map((row) => {
+              const port = Number(row.port);
+              return {
+                id: row.id.trim().toLowerCase(),
+                label: row.label.trim(),
+                ...row.host.trim() === '' ? {} : { host: row.host.trim() },
+                ...row.port.trim() === '' || !Number.isInteger(port) ? {} : { port },
+                ...row.user.trim() === '' ? {} : { user: row.user.trim() },
+                ...row.password === '' ? {} : { password: row.password },
+                ...row.clearPassword === true ? { clearPassword: true } : {},
+                ...row.alias.trim() === '' ? {} : { alias: row.alias.trim() },
+                ...row.restartCommand.trim() === '' ? {} : { restartCommand: row.restartCommand.trim() },
+                protected: row.protected === true,
+                targets: targetsBody(row.remoteDirs, row.containers),
+              };
+            }),
+            targets: targetsBody(deployTargets, deployContainers),
+          };
           try {
             const response = await fetch('/dsh-devship/deploy-config', {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                root: resolveRoot(),
-                config,
-                ...options.clearPassword === true ? { clearPassword: true } : {},
-              }),
+              body: JSON.stringify({ root: resolveRoot(), config }),
             });
             const payload = await response.json();
             if (payload.ok === true) {
               setDeployNote(t('deploySaved'));
-              // 明文密码不在输入框里过夜：保存完就擦掉，只留「有没有存」这个状态
-              setDeployForm((current) => ({ ...current, password: '' }));
-              setDeployHasPassword(payload.config?.hasPassword === true);
+              // 明文密码不在输入框里过夜：按 Host 回的句子重拼一遍，只留「每台存没存」
+              const saved = Array.isArray(payload.config?.servers) ? payload.config.servers : [];
+              const nextRows = saved.map(envRowOf);
+              setEnvRows(nextRows);
+              if (nextRows.length > 0 && !nextRows.some((row) => row.id === draftDefault)) setDraftDefault(nextRows[0].id);
               await refreshList();
             } else {
               setDeployNote(errorText(payload.error, t('errorTitle')));
@@ -1041,6 +1170,56 @@ window.__ModuleLoader__.load({
           } catch (failure) {
             setDeployNote(failure instanceof Error ? failure.message : String(failure));
           }
+        };
+
+        const updateEnvRow = (index, patch) => setEnvRows((current) => current.map((row, position) => (position === index ? { ...row, ...patch } : row)));
+        const updateEnvTarget = (index, projectId, field, value) => setEnvRows((current) => current.map((row, position) => (
+          position === index ? { ...row, [field]: { ...row[field], [projectId]: value } } : row
+        )));
+
+        /** 加一台：id 先给个不撞车的占位，名称让用户自己改。 */
+        const addEnvRow = () => {
+          const taken = new Set(envRows.map((row) => row.id));
+          let id = 'srv1';
+          for (let index = 1; index < 20; index += 1) {
+            if (!taken.has(`srv${index}`)) {
+              id = `srv${index}`;
+              break;
+            }
+          }
+          setEnvRows((current) => [...current, emptyEnvRow(id)]);
+        };
+
+        const removeEnvRow = (index) => {
+          const removed = envRows[index];
+          setEnvRows((current) => current.filter((_row, position) => position !== index));
+          if (removed !== undefined && removed.id === draftDefault) {
+            const next = envRows.filter((_row, position) => position !== index);
+            setDraftDefault(next.length > 0 ? next[0].id : '');
+          }
+        };
+
+        /** 删掉这台存着的密码（改回用密钥或重新填）。 */
+        const clearEnvPassword = (index) => {
+          const cleared = envRows.map((row, position) => (position === index ? { ...row, password: '', clearPassword: true } : row));
+          setEnvRows(cleared);
+          void saveEnvRows(cleared);
+        };
+
+        /**
+         * 只有一台老配置时给的一条捷径：把它填进「开发」，再生成测试和生产两台空的。
+         * 这里只改面板里的草稿，要用户再点「保存配置」才会写盘。
+         */
+        const migrateToEnvs = () => {
+          const current = envRows[0] ?? emptyEnvRow('dev');
+          const seeded = (id, label, isProtected) => ({ ...emptyEnvRow(id), label, protected: isProtected });
+          setEnvRows([
+            { ...current, id: 'dev', label: t('envSeedDev'), protected: false, clearPassword: false },
+            seeded('test', t('envSeedTest'), false),
+            seeded('prod', t('envSeedProd'), true),
+          ]);
+          setDraftDefault('dev');
+          setDeployNote(t('deployEnvMigrateHint'));
         };
 
         const selectedEntry = runningMap.get(selected) ?? buildMap.get(selected);
@@ -1119,6 +1298,37 @@ window.__ModuleLoader__.load({
             setError(failure instanceof Error ? failure.message : String(failure));
           }
         };
+
+        /**
+         * 卡片上的「部署 / 发布」：受保护环境第一次点只是把它举成「待确认」
+         * （按钮变红、文案变成「确认发到 生产」），第二次点才带 confirm 真发。
+         * 任务 id 与 Host 侧 lib/deploy.js 的 taskKeyOf 同一份规则，日志才对得上。
+         */
+        const armProtectedEnv = () => {
+          setConfirmEnv(envId);
+        };
+        const deployOne = (project) => {
+          if (envProtected === true && armedEnv !== true) {
+            armProtectedEnv();
+            return;
+          }
+          setConfirmEnv('');
+          const key = taskKey('deploy', project.id);
+          openLog(key);
+          void act(key, '/deploy', envBody({ projectId: project.id }));
+        };
+        const releaseOne = (project) => {
+          if (envProtected === true && armedEnv !== true) {
+            armProtectedEnv();
+            return;
+          }
+          setConfirmEnv('');
+          const key = taskKey('release', project.id);
+          openLog(key);
+          void act(key, '/release', envBody({ projectId: project.id, clean, fast: fastBuild }));
+        };
+        /** 按钮文案：待确认时点名是哪台，让人看清了再点。 */
+        const envConfirmLabel = () => `${t('deployEnvConfirm')} ${currentServer?.label ?? envId}`;
 
         const projectCard = (project) => {
           const run = runningMap.get(project.id);
@@ -1206,20 +1416,20 @@ window.__ModuleLoader__.load({
               typeof project.deploy === 'object' && project.deploy !== null
                 ? h('button', {
                   type: 'button',
-                  style: styles.button,
-                  disabled: isBusy || busy['deploy:' + project.id] === true,
-                  title: `${t('deployTarget')}: ${project.deploy.remoteDir}`,
-                  onClick: () => { openLog('deploy:' + project.id); void act('deploy:' + project.id, '/deploy', { projectId: project.id }); },
-                }, busy['deploy:' + project.id] === true ? h(Spinner) : null, busy['deploy:' + project.id] === true ? t('working') : t('deploy'))
+                  style: armedEnv === true ? styles.buttonDanger : styles.button,
+                  disabled: isBusy || busy[taskKey('deploy', project.id)] === true,
+                  title: armedEnv === true ? t('deployEnvConfirmHint') : `${t('deployTarget')}: ${project.deploy.remoteDir}`,
+                  onClick: () => deployOne(project),
+                }, busy[taskKey('deploy', project.id)] === true ? h(Spinner) : null, busy[taskKey('deploy', project.id)] === true ? t('working') : (armedEnv === true ? envConfirmLabel() : t('deploy')))
                 : null,
               typeof project.deploy === 'object' && project.deploy !== null
                 ? h('button', {
                   type: 'button',
-                  style: styles.buttonPrimary,
-                  disabled: isBusy || busy['release:' + project.id] === true,
-                  title: `打包 → 部署${project.deploy.container === undefined ? '' : ` → 重启 ${project.deploy.container}`}`,
-                  onClick: () => { openLog('release:' + project.id); void act('release:' + project.id, '/release', { projectId: project.id, clean, fast: fastBuild }); },
-                }, busy['release:' + project.id] === true ? h(Spinner) : null, busy['release:' + project.id] === true ? t('releasing') : t('release'))
+                  style: armedEnv === true ? styles.buttonDanger : styles.buttonPrimary,
+                  disabled: isBusy || busy[taskKey('release', project.id)] === true,
+                  title: armedEnv === true ? t('deployEnvConfirmHint') : `打包 → 部署${project.deploy.container === undefined ? '' : ` → 重启 ${project.deploy.container}`}`,
+                  onClick: () => releaseOne(project),
+                }, busy[taskKey('release', project.id)] === true ? h(Spinner) : null, busy[taskKey('release', project.id)] === true ? t('releasing') : (armedEnv === true ? envConfirmLabel() : t('release')))
                 : null,
             ),
           );
@@ -1241,6 +1451,27 @@ window.__ModuleLoader__.load({
           ),
           h('div', { style: { ...styles.tiny, ...styles.mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: root }, root),
           h('div', { style: styles.actions },
+            deployServers.length === 0
+              ? h('span', { style: styles.tiny }, t('deployEnvNone'))
+              : h('select', {
+                style: styles.select,
+                value: envId,
+                title: `${t('deployEnv')}：${t('deployEnvHint')}`,
+                onChange: (event) => {
+                  setDeployEnv(event.target.value);
+                  setConfirmEnv('');
+                  void refreshList();
+                },
+              },
+                ...deployServers.map((server) => h('option', {
+                  key: server.id,
+                  value: server.id,
+                }, `${server.label}${server.protected === true ? ` ${t('deployEnvProtected')}` : ''}${server.isDefault === true ? ` ${t('deployEnvDefaultBadge')}` : ''}`)),
+              ),
+            currentServer === undefined
+              ? null
+              : h('span', { style: { ...styles.tiny, ...styles.mono }, title: t('deployEnvHint') }, `${currentServer.user}@${currentServer.host}:${currentServer.port}`),
+            h('span', { style: styles.spacer }),
             h('select', {
               style: styles.select,
               value: profile,
@@ -1302,16 +1533,32 @@ window.__ModuleLoader__.load({
             }, busy.batch === true ? h(Spinner) : null, t('stopSelected')),
             h('button', {
               type: 'button',
-              style: styles.button,
+              style: armedEnv === true ? styles.buttonDanger : styles.button,
               disabled: busy.batch === true || checkedIds.length === 0,
-              onClick: () => runBatch('/deploy-batch', checkedIds),
-            }, busy.batch === true ? h(Spinner) : null, t('deploySelected')),
+              title: armedEnv === true ? t('deployEnvConfirmHint') : t('deployEnvHint'),
+              onClick: () => {
+                if (envProtected === true && armedEnv !== true) {
+                  armProtectedEnv();
+                  return;
+                }
+                setConfirmEnv('');
+                void runBatch('/deploy-batch', checkedIds, envBody());
+              },
+            }, busy.batch === true ? h(Spinner) : null, busy.batch === true ? t('working') : (armedEnv === true ? envConfirmLabel() : t('deploySelected'))),
             h('button', {
               type: 'button',
-              style: styles.buttonPrimary,
+              style: armedEnv === true ? styles.buttonDanger : styles.buttonPrimary,
               disabled: busy.batch === true || checkedIds.length === 0,
-              onClick: () => runBatch('/release-batch', checkedIds),
-            }, busy.batch === true ? h(Spinner) : null, t('releaseSelected')),
+              title: armedEnv === true ? t('deployEnvConfirmHint') : t('deployEnvHint'),
+              onClick: () => {
+                if (envProtected === true && armedEnv !== true) {
+                  armProtectedEnv();
+                  return;
+                }
+                setConfirmEnv('');
+                void runBatch('/release-batch', checkedIds, envBody());
+              },
+            }, busy.batch === true ? h(Spinner) : null, busy.batch === true ? t('working') : (armedEnv === true ? envConfirmLabel() : t('releaseSelected'))),
             h('span', { style: styles.spacer }),
             hidden.length === 0
               ? null
@@ -1364,58 +1611,123 @@ window.__ModuleLoader__.load({
             : null,
           deployOpen
             ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, padding: '2px 0' } },
-              h('div', { style: { fontWeight: 600, fontSize: 12 } }, t('deployServer')),
-              h('div', { style: styles.actions },
-                h('input', {
-                  value: deployForm.host,
-                  placeholder: t('deployHost'),
-                  spellCheck: false,
-                  onChange: (event) => setDeployForm((current) => ({ ...current, host: event.target.value })),
-                  style: { ...styles.input, flex: '1 1 130px', minWidth: 110 },
-                }),
-                h('input', {
-                  value: deployForm.port,
-                  placeholder: t('deployPort'),
-                  inputMode: 'numeric',
-                  onChange: (event) => setDeployForm((current) => ({ ...current, port: event.target.value })),
-                  style: { ...styles.input, flex: '0 0 58px' },
-                }),
-              ),
-              h('div', { style: styles.actions },
-                h('input', {
-                  value: deployForm.user,
-                  placeholder: t('deployUser'),
-                  spellCheck: false,
-                  onChange: (event) => setDeployForm((current) => ({ ...current, user: event.target.value })),
-                  style: { ...styles.input, flex: '1 1 90px', minWidth: 80 },
-                }),
-                h('input', {
-                  value: deployForm.password,
-                  placeholder: deployHasPassword ? t('deployPasswordSaved') : t('deployPassword'),
-                  ...(deployHasPassword ? { title: t('deployPasswordSaved') } : {}),
-                  type: 'password',
-                  autoComplete: 'new-password',
-                  onChange: (event) => setDeployForm((current) => ({ ...current, password: event.target.value })),
-                  style: { ...styles.input, flex: '1 1 110px', minWidth: 90 },
-                }),
-                deployHasPassword && deployForm.password === ''
-                  ? h('button', {
+              h('div', { style: { fontWeight: 600, fontSize: 12 } }, t('deployConfig')),
+              ...envRows.map((row, index) => h('div', { key: `${row.id}-${index}`, style: styles.card },
+                h('div', { style: styles.cardHead },
+                  h('input', {
+                    value: row.label,
+                    placeholder: t('deployEnvLabelHint'),
+                    title: t('deployEnvLabelHint'),
+                    onChange: (event) => updateEnvRow(index, { label: event.target.value }),
+                    style: { ...styles.input, flex: '0 0 92px' },
+                  }),
+                  h('input', {
+                    value: row.id,
+                    placeholder: t('deployEnvIdHint'),
+                    title: t('deployEnvIdHint'),
+                    spellCheck: false,
+                    onChange: (event) => updateEnvRow(index, { id: event.target.value }),
+                    style: { ...styles.input, ...styles.mono, flex: '0 0 92px' },
+                  }),
+                  row.id === draftDefault
+                    ? h('span', { style: styles.tiny }, t('deployEnvDefaultBadge'))
+                    : h('button', { type: 'button', style: styles.button, onClick: () => setDraftDefault(row.id) }, t('deployEnvSetDefault')),
+                  h('label', { style: { ...styles.tiny, display: 'flex', alignItems: 'center', gap: 3 }, title: t('deployEnvProtectedHint') },
+                    h('input', { type: 'checkbox', checked: row.protected, onChange: (event) => updateEnvRow(index, { protected: event.target.checked }) }),
+                    t('deployEnvProtected'),
+                  ),
+                  h('span', { style: styles.spacer }),
+                  h('button', { type: 'button', style: styles.button, onClick: () => removeEnvRow(index) }, t('deployEnvRemove')),
+                ),
+                h('div', { style: styles.actions },
+                  h('input', {
+                    value: row.host,
+                    placeholder: t('deployHost'),
+                    spellCheck: false,
+                    onChange: (event) => updateEnvRow(index, { host: event.target.value }),
+                    style: { ...styles.input, flex: '1 1 130px', minWidth: 110 },
+                  }),
+                  h('input', {
+                    value: row.port,
+                    placeholder: t('deployPort'),
+                    inputMode: 'numeric',
+                    onChange: (event) => updateEnvRow(index, { port: event.target.value }),
+                    style: { ...styles.input, flex: '0 0 58px' },
+                  }),
+                  h('input', {
+                    value: row.user,
+                    placeholder: t('deployUser'),
+                    spellCheck: false,
+                    onChange: (event) => updateEnvRow(index, { user: event.target.value }),
+                    style: { ...styles.input, flex: '1 1 90px', minWidth: 80 },
+                  }),
+                  h('input', {
+                    value: row.password,
+                    placeholder: row.hasPassword ? t('deployPasswordSaved') : t('deployPassword'),
+                    ...(row.hasPassword ? { title: t('deployPasswordSaved') } : {}),
+                    type: 'password',
+                    autoComplete: 'new-password',
+                    onChange: (event) => updateEnvRow(index, { password: event.target.value, clearPassword: false }),
+                    style: { ...styles.input, flex: '1 1 110px', minWidth: 90 },
+                  }),
+                  row.hasPassword === true && row.password === ''
+                    ? h('button', {
+                      type: 'button',
                       title: t('deployPasswordClearHint'),
-                      onClick: () => { void saveDeployConfig({ clearPassword: true }); },
+                      onClick: () => clearEnvPassword(index),
                     }, t('deployPasswordClear'))
+                    : null,
+                ),
+                h('div', { style: styles.actions },
+                  h('input', {
+                    value: row.alias,
+                    placeholder: t('deployAliasHint'),
+                    spellCheck: false,
+                    onChange: (event) => updateEnvRow(index, { alias: event.target.value }),
+                    style: { ...styles.input, flex: '1 1 150px', minWidth: 120 },
+                  }),
+                  h('input', {
+                    value: row.restartCommand,
+                    placeholder: t('deployEnvRestartHint'),
+                    title: t('deployEnvRestartHint'),
+                    spellCheck: false,
+                    onChange: (event) => updateEnvRow(index, { restartCommand: event.target.value }),
+                    style: { ...styles.input, flex: '1 1 150px', minWidth: 120 },
+                  }),
+                ),
+                projects.length === 0
+                  ? h('div', { style: styles.tiny }, t('empty'))
+                  : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+                    h('div', { style: styles.tiny }, t('deployEnvTargetsTitle')),
+                    projects.map((project) => h('div', { key: project.id, style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                      h('span', { style: { ...styles.tiny, flex: '0 0 120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: project.id }, project.name),
+                      h('input', {
+                        value: row.remoteDirs[project.id] ?? '',
+                        placeholder: t('deployRemoteDir'),
+                        spellCheck: false,
+                        onChange: (event) => updateEnvTarget(index, project.id, 'remoteDirs', event.target.value),
+                        style: { ...styles.input, flex: 1, minWidth: 0 },
+                      }),
+                      h('input', {
+                        value: row.containers[project.id] ?? '',
+                        placeholder: t('deployContainer'),
+                        spellCheck: false,
+                        onChange: (event) => updateEnvTarget(index, project.id, 'containers', event.target.value),
+                        style: { ...styles.input, flex: '0 0 92px' },
+                      }),
+                    )),
+                  ),
+              )),
+              h('div', { style: styles.actions },
+                h('button', { type: 'button', style: styles.button, onClick: addEnvRow }, t('deployEnvAdd')),
+                envRows.length === 1 && envRows[0].id === LEGACY_ENV
+                  ? h('button', { type: 'button', style: styles.button, title: t('deployEnvMigrateHint'), onClick: migrateToEnvs }, t('deployEnvMigrate'))
                   : null,
+                deployHosts.length === 0
+                  ? null
+                  : h('span', { style: styles.tiny }, 'dsh-ssh: ' + deployHosts.map((host) => `${host.alias}=${host.user}@${host.host}`).join('  ')),
               ),
-              h('input', {
-                value: deployForm.alias,
-                placeholder: t('deployAliasHint'),
-                spellCheck: false,
-                onChange: (event) => setDeployForm((current) => ({ ...current, alias: event.target.value })),
-                style: { ...styles.input, width: '100%', boxSizing: 'border-box' },
-              }),
-              deployHosts.length === 0
-                ? null
-                : h('div', { style: styles.tiny }, 'dsh-ssh: ' + deployHosts.map((host) => `${host.alias}=${host.user}@${host.host}`).join('  ')),
-              h('div', { style: { fontWeight: 600, fontSize: 12, marginTop: 2 } }, t('deployTargetsTitle')),
+              h('div', { style: { fontWeight: 600, fontSize: 12, marginTop: 2 } }, t('deploySharedTargetsTitle')),
               projects.length === 0
                 ? h('div', { style: styles.tiny }, t('empty'))
                 : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
@@ -1438,7 +1750,7 @@ window.__ModuleLoader__.load({
                   )),
                 ),
               h('div', { style: styles.actions },
-                h('button', { type: 'button', style: styles.buttonPrimary, onClick: saveDeployConfig }, t('deploySave')),
+                h('button', { type: 'button', style: styles.buttonPrimary, onClick: () => { void saveEnvRows(envRows); } }, t('deploySave')),
                 h('button', { type: 'button', style: styles.button, onClick: () => setDeployOpen(false) }, t('hide')),
               ),
               deployNote === '' ? null : h('div', { style: styles.tiny }, deployNote),

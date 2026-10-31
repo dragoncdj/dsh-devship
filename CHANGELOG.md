@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.0
+
+- **Feature**: 部署配置从「一台测试机」变成「多台环境」：`deploy.json` 新形状是 `servers: [...]` + `defaultServer`，每台有自己的地址 / 端口 / 用户 / 密码 / `dsh-ssh` alias / 重启命令 / 远端目录覆盖，最多 12 台。面板顶部新增「发布环境」下拉，「部署 / 发布 / 部署选中 / 发布选中」都发往选中的那台（一次只发一台，不跨环境扇出）；卡片按钮的标题、`user@host:port`、远端目录都跟着选中的环境变
+- **Feature**: 环境可改名、可加、可删、可设默认，并内置一条捷径：只有一台老配置时点「拆成开发 / 测试 / 生产」，把现在这台填进「开发」，再生成「测试」和「生产」（生产预置受保护）——点了只改面板草稿，要再点「保存配置」才写盘
+- **Feature**: 受保护环境要确认：勾了「受保护」的那台，第一次点部署 / 发布只会把按钮变成红色的「确认发到 生产」，第二次点才带 `confirm: true`。Host 在连 SSH 之前就把没确认的请求挡回去（批量里有一台没确认就整批拒绝并点名是哪台）
+- **Feature**: 远端目录分两层：`servers[环境].targets[项目].remoteDir` 优先，没有就用顶层公共 `targets[项目].remoteDir`（就是老 `deploy.json` 的那一份）。同一个项目可以在开发放 `/data/apps/dev`、在生产放 `/data/apps/demo`
+- **Compat**: 老形状 `deploy.json`（顶层一台 + 一份 `targets`）读进来会合成成 id 为 `default` 的一个环境：任务 id 仍是 `deploy:<项目>`、日志仍是 `logs/deploy-<项目>.log`、不带 `serverId` 的请求行为与 2.1.x 逐字节一致。带环境的任务 id 用下划线后缀（`deploy_prod_app-server`）：`slug()` 把 `:` 归一成 `-`，若写成 `deploy:prod:app-server` 就会和「项目 id 叫 prod/app-server」的老条目撞同一个日志文件，下划线前后缀则一定撞不上（环境 id 因此不许带下划线）
+- **Compat**: 协议 4 → 5（`/version.version` 与 `diagnostics.code`）：路由路径一条没加，只多了 `serverId` / `confirm` 请求字段和 `servers` / `defaultServer` 响应字段。新面板配老 Host 会退化成一个「默认」环境；老面板配新 Host 顶层 `host/port/user/alias/hasPassword` 镜像默认那台，照常能发
+- **Security**: 密码按环境各存一份，回传浏览器时每台只给 `hasPassword`，明文不出 Host；「留空保持、`clearPassword` 才真删」这条口径也按环境各算一份。老面板发不出密码，所以老形状写入会从默认那台继承，不会把已经配好的凭据擦掉
+- **Internal**: [lib/prefs.js](lib/prefs.js) 承担全部配置归一化与校验（`readDeployConfig` / `publicDeployConfig` / `mergeServers` / `buildDeployConfig` / `buildLegacyDeployConfig` / `resolveServer` / `deployTargetOf`），校验不过一律 `{ok:false,error}`，不静默写坏配置；[routes.js](routes.js) 只多两个本地 helper（`serverSummary` / `pickServer`）；[lib/deploy.js](lib/deploy.js) 的 `taskKeyOf` 是任务 id 规则的唯一来源
+- **UI**: 「部署配置」面板改成按环境分卡片编辑（每台一行连接 + 一份自己的远端目录表），下面保留「公共远端目录（哪台都没配时用它）」；删了不再用的 `deployServer` / `deployTargetsTitle` 两个文案键，中英文各 113 键保持同键同顺序
+- **Tests**: 新增 [test/task-key.test.mjs](test/task-key.test.mjs)（老 id 与日志文件名逐字节不变、带环境的后缀、与老 id 不撞日志文件）和 [test/dict-parity.test.mjs](test/dict-parity.test.mjs)（zh / en 同键同数，代码里用到的每个 `t('key')` 两边都得有）；[test/prefs.test.mjs](test/prefs.test.mjs) 补 7 条（老形状合成、多环境往返与目录覆盖优先、明文不出门、按环境的密码保持/清除、id 非法与重复与上限、`defaultServer` 回落、`resolveServer` 报错）；[test/routes.test.mjs](test/routes.test.mjs) 补 5 条（写多台读回摘要、非法 id 不写盘、老形状保存不擦密码、`/list` 环境摘要与坏 id 回落、未知环境与受保护确认）；全套 101 项
+
 ## 2.1.3
 
 - **Fix**: 上传进度一直停在 `32 KB / xxx MB` 不动、传完才一下跳满（界面和日志里那行 `↑ …` 都一样）。根因是 ssh2 `fastPut` 的 `step` 回调参数取错了：它的真实签名是 `step(已传累计, 本次块大小, 文件总大小)`（见 ssh2 `lib/protocol/SFTP.js` 的 `fastXfer`：`onstep(total, nb, fsize)`，`chunkSize` 默认就是 32768），以前接的是第二个参数，也就是「这一块多少字节」——每块都是 32768，所以进度器收到的已传字节永远是 32 KB，直到 `endFile` 按文件大小一次性记账才跳成 100%。现在取第一个参数（累计已传），进度按 32 KB 一段一段往前走

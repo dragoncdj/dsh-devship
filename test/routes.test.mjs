@@ -105,8 +105,8 @@ test('路由表与协议版本：路径清单是硬约束（改了必须同步 c
   // 版本号只有一个来源（routes.js 的 PROTOCOL），/version 与 /diagnostics 必须一致
   const version = await call('/dsh-devship/version');
   assert.equal(version.ok, true);
-  assert.equal(version.version, '4');
-  assert.equal(version.diagnostics.code, 'dsh-devship/4');
+  assert.equal(version.version, '5');
+  assert.equal(version.diagnostics.code, 'dsh-devship/5');
   assert.ok(Array.isArray(version.clientReports));
 }));
 
@@ -203,4 +203,94 @@ test('/prefs：自动清除开关与延迟档位都校验', async () => await wi
 
   const readBack = await call('/dsh-devship/prefs', { root });
   assert.deepEqual(readBack.autoClear, { build: true, deploy: true, release: false, delayMs: 30000 });
+}));
+
+const DEV = { id: 'dev', label: '开发', host: '10.0.0.5', user: 'deploy', password: 'dev-pass', targets: { api: { remoteDir: '/srv/dev/api' } } };
+const PROD = { id: 'prod', label: '生产', host: 'prod.example.com', user: 'release', protected: true, restartCommand: 'docker restart api' };
+
+test('/deploy-config：写多台环境 → 读回摘要，明文不出门，各环境的目录各留各的', async () => await withPlugin(async ({ root, call }) => {
+  const saved = await call('/dsh-devship/deploy-config', {
+    root,
+    config: { defaultServer: 'dev', servers: [DEV, PROD], targets: { web: { remoteDir: '/srv/common/web' } } },
+  });
+  assert.equal(saved.ok, true);
+  assert.equal(JSON.stringify(saved.config).includes('dev-pass'), false, '整个响应里不许出现明文');
+  assert.deepEqual(saved.config.servers.map((server) => server.id), ['dev', 'prod']);
+  assert.equal(saved.config.servers[0].hasPassword, true);
+  assert.equal(saved.config.servers[1].hasPassword, false);
+  assert.equal(saved.config.servers[1].protected, true);
+  assert.equal(saved.config.servers[0].isDefault, true);
+  assert.equal(saved.config.host, '10.0.0.5', '顶层 host 镜像默认那一台，老面板照常能用');
+  assert.deepEqual(saved.config.servers[0].targets.api, { remoteDir: '/srv/dev/api' });
+  assert.deepEqual(saved.config.targets.web, { remoteDir: '/srv/common/web' });
+
+  const read = await call('/dsh-devship/deploy-config', { root });
+  assert.equal(read.config.defaultServer, 'dev');
+  assert.equal(read.config.servers[1].restartCommand, 'docker restart api');
+  const onDisk = await readFile(join(root, '.dsh-devship', 'deploy.json'), 'utf8');
+  assert.ok(onDisk.includes('dev-pass'), '明文只留在盘上');
+}));
+
+test('/deploy-config：非法环境 id 与重复 id 都报错，不静默写坏配置', async () => await withPlugin(async ({ root, call }) => {
+  const bad = await call('/dsh-devship/deploy-config', { root, config: { servers: [{ id: '开发 环境', host: 'h' }] } });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /环境 id 不合法/u);
+  assert.equal(existsSync(join(root, '.dsh-devship', 'deploy.json')), false, '校验不过不该写盘');
+
+  const duplicated = await call('/dsh-devship/deploy-config', { root, config: { servers: [{ id: 'dev' }, { id: 'dev' }] } });
+  assert.equal(duplicated.ok, false);
+  assert.match(duplicated.error, /环境 id 重复/u);
+}));
+
+test('/deploy-config：老形状保存不会把已配好的环境密码擦掉', async () => await withPlugin(async ({ root, call }) => {
+  await call('/dsh-devship/deploy-config', { root, config: { defaultServer: 'dev', servers: [DEV] } });
+  // 老面板只会发顶层字段、也发不出密码（它读到的从来是 hasPassword）
+  const legacy = await call('/dsh-devship/deploy-config', { root, config: { host: '10.0.0.5', user: 'deploy', targets: {} } });
+  assert.equal(legacy.ok, true);
+  assert.equal(legacy.config.hasPassword, true, '默认那台的密码得继承下来');
+  const onDisk = await readFile(join(root, '.dsh-devship', 'deploy.json'), 'utf8');
+  assert.ok(onDisk.includes('dev-pass'), '一次老面板保存不该擦掉能用的凭据');
+}));
+
+test('/list：回环境摘要与默认环境，部署目录按选中的那台算', async () => await withPlugin(async ({ root, call }) => {
+  await call('/dsh-devship/deploy-config', { root, config: { defaultServer: 'dev', servers: [DEV, { ...PROD, alias: 'prod-alias' }] } });
+  const listed = await call('/dsh-devship/list', { root });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.defaultServer, 'dev');
+  assert.deepEqual(listed.servers.map((server) => server.id), ['dev', 'prod']);
+  assert.equal(listed.deployAlias, '', '默认那台没用 alias');
+  assert.equal(JSON.stringify(listed).includes('dev-pass'), false);
+
+  const prodListed = await call('/dsh-devship/list', { root, serverId: 'prod' });
+  assert.equal(prodListed.deployAlias, 'prod-alias', '选了 prod 就报 prod 的 alias');
+
+  // 面板里存着一个已经不存在的环境 id：回落默认那台，别把列表空掉
+  const stale = await call('/dsh-devship/list', { root, serverId: 'ghost' });
+  assert.equal(stale.deployAlias, '');
+}));
+
+test('/deploy 与 /release-batch：未知环境报错，受保护环境要 confirm', async () => await withPlugin(async ({ root, call }) => {
+  await call('/dsh-devship/deploy-config', { root, config: { defaultServer: 'dev', servers: [DEV, PROD] } });
+
+  const unknown = await call('/dsh-devship/deploy', { root, projectId: 'api', serverId: 'ghost' });
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error, /未知环境: ghost/u);
+
+  const unconfirmed = await call('/dsh-devship/deploy', { root, projectId: 'api', serverId: 'prod' });
+  assert.equal(unconfirmed.ok, false);
+  assert.match(unconfirmed.error, /需要再点一次确认/u);
+  assert.match(unconfirmed.error, /生产/u, '报错要点名是哪台');
+
+  // 带 confirm 就放行：往下走到「未知项目」，说明确认这一关过了
+  const confirmed = await call('/dsh-devship/deploy', { root, projectId: 'api', serverId: 'prod', confirm: true });
+  assert.equal(confirmed.ok, false);
+  assert.match(confirmed.error, /未知项目/u);
+
+  // 不带 serverId = 默认那台（dev，不受保护），不该被确认关卡拦住
+  const defaulted = await call('/dsh-devship/deploy', { root, projectId: 'api' });
+  assert.match(defaulted.error, /未知项目/u);
+
+  const batch = await call('/dsh-devship/release-batch', { root, projectIds: ['api'], serverId: 'prod' });
+  assert.equal(batch.ok, false);
+  assert.match(batch.error, /需要再点一次确认/u);
 }));
