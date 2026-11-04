@@ -1872,7 +1872,8 @@ window.__ModuleLoader__.load({
                 clearButton(builds.map((entry) => entry.id), 'clear:all', t('clearAll')),
               ),
               builds.map((entry) => {
-                const progress = progressOf(entry);
+                // 发布时子任务（部署）的进度已经镜像到「发布」那张卡上，这张子卡不重复画
+                const progress = entry.progressInParent === true ? undefined : progressOf(entry);
                 const percent = progress === undefined ? 0 : Math.max(0, Math.min(100, progress.percent));
                 return h(
                   'div',

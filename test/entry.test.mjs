@@ -55,6 +55,15 @@ test('progress：条目上有上传进度才带出去，没有就不加这个字
   assert.deepEqual(publicEntry({ ...base, progress }, 8000).progress, progress);
 });
 
+test('progressInParent：发布里的子任务标一下，面板就不再画第二条进度条', () => {
+  assert.equal('progressInParent' in publicEntry({ ...base }, 8000), false);
+  const progress = { uploaded: 100, total: 400, percent: 25, bytesPerSecond: 1024 };
+  const child = publicEntry({ ...base, progress, progressInParent: true }, 8000);
+  assert.equal(child.progressInParent, true);
+  assert.deepEqual(child.progress, progress, '进度本身照旧回传（父卡就是靠它画的那一条）');
+  assert.equal('progressInParent' in publicEntry({ ...base, progressInParent: 'yes' }, 8000), false);
+});
+
 test('JDK 常见目录按平台给，不跨平台乱扫', () => {
   const hints = jdkRootHints().map((hint) => hint());
   const windowsDirs = hints.some((hint) => typeof hint === 'string' && hint.includes('Program Files'));
