@@ -1275,14 +1275,19 @@ window.__ModuleLoader__.load({
           if (node !== null && node !== undefined) node.scrollTop = node.scrollHeight;
         }, [tail, selected, showLog]);
 
+        /** 状态文案：部署 / 发布卡的「完成」不该说成「打包完成」，按任务种类换词。 */
         const stateLabel = (entry) => {
-          if (entry.state === 'running') return entry.adopted === true ? t('stateAdopted') : entry.phase === 'deps' ? t('stateDeps') : t('stateRunning');
+          const kindWord = entry.kind === 'deploy' ? t('deploy') : entry.kind === 'release' ? t('release') : '';
+          if (entry.state === 'running') {
+            if (kindWord !== '') return `${kindWord}中`;
+            return entry.adopted === true ? t('stateAdopted') : entry.phase === 'deps' ? t('stateDeps') : t('stateRunning');
+          }
           if (entry.state === 'building') return t('stateDeps');
           if (entry.state === 'stopping') return t('stateStopping');
           if (entry.state === 'stopped') return t('stateStopped');
           if (entry.state === 'exited') return t('stateExited');
-          if (entry.state === 'success') return t('stateSuccess');
-          if (entry.state === 'failed') return t('stateFailed');
+          if (entry.state === 'success') return kindWord === '' ? t('stateSuccess') : `${kindWord}完成`;
+          if (entry.state === 'failed') return kindWord === '' ? t('stateFailed') : `${kindWord}失败`;
           return t('stateBuilding');
         };
 
