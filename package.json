@@ -27,6 +27,7 @@
     "icon.svg",
     "README.md",
     "docs/screenshots/panel.png",
+    "screenshots.json",
     "LICENSE",
     "CHANGELOG.md"
   ],
@@ -51,7 +52,7 @@
     "url": "https://github.com/dragoncdj/dsh-devship/issues"
   },
   "engines": {
-    "dsh": ">=0.2.0-rc.2"
+    "dsh": ">=0.1.7-rc.2 <0.2.0-0 || >=0.2.0-rc.2"
   },
   "optionalDependencies": {
     "ssh2": "^1.15.0"
